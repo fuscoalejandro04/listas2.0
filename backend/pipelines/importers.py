@@ -33,7 +33,7 @@ class CellInfo:
     col: int
     value: Optional[str] = None
     cell_type: CellType = CellType.EMPTY
-    is_merged: bool = False
+    is_merged: bool = False  # Mantenemos el campo pero siempre será False en read_only
     bold: bool = False
     fill_color: Optional[str] = None
     border_bottom: bool = False
@@ -164,7 +164,7 @@ class StyleAnalyzer:
         return result
 
 # ============================================================
-# WORKSHEET SCANNER
+# WORKSHEET SCANNER (SIN merged_cells para read_only)
 # ============================================================
 
 class WorksheetScanner:
@@ -172,7 +172,8 @@ class WorksheetScanner:
         self.worksheet = worksheet
         self.max_rows = max_rows
         self.max_cols = max_cols
-        self._merged_cells = set(worksheet.merged_cells) if worksheet.merged_cells else set()
+        # En modo read_only no se puede acceder a merged_cells, así que lo omitimos
+        # No necesitamos merged_cells para la detección de región tabular.
 
     def scan(self) -> List[RowInfo]:
         rows_info = []
@@ -183,7 +184,8 @@ class WorksheetScanner:
             for col_idx in range(1, min(self.max_cols, self.worksheet.max_column) + 1):
                 cell = self.worksheet.cell(row=row_idx, column=col_idx)
                 value = cell.value
-                is_merged = self._is_cell_merged(row_idx, col_idx)
+                # No verificamos merged cells en read_only
+                is_merged = False
                 cell_type = TypeClassifier.classify(value)
                 cell_info = CellInfo(
                     row=row_idx - 1,
@@ -217,11 +219,8 @@ class WorksheetScanner:
             rows_info.append(row_info)
         return rows_info
 
+    # Este método ya no es necesario, pero lo mantenemos por compatibilidad (siempre retorna False)
     def _is_cell_merged(self, row: int, col: int) -> bool:
-        for merged_range in self._merged_cells:
-            if merged_range.min_row <= row <= merged_range.max_row and \
-               merged_range.min_col <= col <= merged_range.max_col:
-                return True
         return False
 
 # ============================================================
