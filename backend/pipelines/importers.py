@@ -47,7 +47,6 @@ class RowInfo:
     number_count: int = 0
     date_count: int = 0
     empty_count: int = 0
-    max_col: int = 0  # Aseguramos que siempre sea int
 
 @dataclass
 class HeaderDetectionResult:
@@ -150,9 +149,9 @@ class StyleAnalyzer:
         return info
 
     @staticmethod
-    def row_style_info(worksheet, row_idx: int, max_col: int) -> dict:
+    def row_style_info(worksheet, row_idx: int, num_cols: int) -> dict:
         result = {'bold_count': 0, 'colored_count': 0, 'has_bottom_border': False}
-        for col in range(1, max_col + 1):
+        for col in range(1, num_cols + 1):
             cell = worksheet.cell(row=row_idx, column=col)
             style = StyleAnalyzer.get_cell_style_info(cell)
             if style['bold']:
@@ -164,7 +163,7 @@ class StyleAnalyzer:
         return result
 
 # ============================================================
-# WORKSHEET SCANNER (Robustez contra None)
+# WORKSHEET SCANNER
 # ============================================================
 
 class WorksheetScanner:
@@ -175,13 +174,11 @@ class WorksheetScanner:
 
     def scan(self) -> List[RowInfo]:
         rows_info = []
-        # Determinar el número real de columnas (mínimo entre max_cols y el máximo de la hoja)
         actual_max_col = min(self.max_cols, self.worksheet.max_column or 1)
         
         for row_idx in range(1, min(self.max_rows, self.worksheet.max_row) + 1):
             cells = []
             non_empty = text_count = number_count = date_count = empty_count = 0
-            max_col = 0
             for col_idx in range(1, actual_max_col + 1):
                 try:
                     cell = self.worksheet.cell(row=row_idx, column=col_idx)
@@ -195,12 +192,11 @@ class WorksheetScanner:
                     col=col_idx - 1,
                     value=str(value) if value is not None else None,
                     cell_type=cell_type,
-                    is_merged=False  # No usamos merged en read_only
+                    is_merged=False
                 )
                 cells.append(cell_info)
                 if cell_type != CellType.EMPTY:
                     non_empty += 1
-                    max_col = max(col_idx, max_col)
                     if cell_type == CellType.TEXT:
                         text_count += 1
                     elif cell_type == CellType.NUMBER:
@@ -210,10 +206,6 @@ class WorksheetScanner:
                 else:
                     empty_count += 1
             
-            # Asegurar que max_col nunca sea None
-            if max_col is None:
-                max_col = 0
-                
             row_info = RowInfo(
                 index=row_idx - 1,
                 cells=cells,
@@ -222,13 +214,12 @@ class WorksheetScanner:
                 number_count=number_count,
                 date_count=date_count,
                 empty_count=empty_count,
-                max_col=max_col
             )
             rows_info.append(row_info)
         return rows_info
 
 # ============================================================
-# TABLE REGION DETECTOR (Robustez contra None y filas vacías)
+# TABLE REGION DETECTOR
 # ============================================================
 
 class TableRegionDetector:
@@ -237,8 +228,8 @@ class TableRegionDetector:
         if not rows_info or len(rows_info) < 2:
             return None
         
-        # Filtrar filas con max_col > 0 y non_empty_count > 0
-        valid_rows = [r for r in rows_info if r.max_col is not None and r.max_col > 0 and r.non_empty_count > 0]
+        # Filtrar filas con al menos una celda no vacía
+        valid_rows = [r for r in rows_info if r.non_empty_count > 0]
         if len(valid_rows) < 2:
             return None
         
@@ -246,17 +237,16 @@ class TableRegionDetector:
         best_score = -1
         best_start = None
         
-        # Asegurar que no nos salimos del rango
         for start_idx in range(max(0, len(valid_rows) - window_size + 1)):
             window = valid_rows[start_idx:start_idx + window_size]
             if len(window) < 2:
                 continue
-                
-            # Obtener el máximo de columnas en la ventana (protegido contra None)
-            max_cols_in_window = max((r.max_col or 0) for r in window)
+            
+            # Determinar el número máximo de columnas en la ventana
+            max_cols_in_window = max(len(r.cells) for r in window)
             if max_cols_in_window == 0:
                 continue
-                
+            
             col_ratios = {}
             for col in range(max_cols_in_window):
                 types = []
@@ -334,7 +324,7 @@ class HeaderCandidateGenerator:
         return sorted(candidates)
 
 # ============================================================
-# HEADER SCORER (Robustez contra None)
+# HEADER SCORER
 # ============================================================
 
 class HeaderScorer:
@@ -344,19 +334,17 @@ class HeaderScorer:
     def score_candidate(self, row_info: RowInfo, style_info: dict, rows_info: List[RowInfo]) -> float:
         scores = {}
         
-        # 1. Estabilidad de tipos
+        # 1. Estabilidad de tipos (comparar con la siguiente fila)
         if row_info.index + 1 < len(rows_info):
             next_row = rows_info[row_info.index + 1]
-            # Proteger contra None en max_col
-            total_cols = min(row_info.max_col or 0, next_row.max_col or 0)
+            total_cols = min(len(row_info.cells), len(next_row.cells))
             if total_cols > 0:
                 consistency = 0
                 for col in range(total_cols):
-                    if col < len(row_info.cells) and col < len(next_row.cells):
-                        t1 = row_info.cells[col].cell_type
-                        t2 = next_row.cells[col].cell_type
-                        if t1 == t2 and t1 != CellType.EMPTY:
-                            consistency += 1
+                    t1 = row_info.cells[col].cell_type
+                    t2 = next_row.cells[col].cell_type
+                    if t1 == t2 and t1 != CellType.EMPTY:
+                        consistency += 1
                 scores['type_stability'] = consistency / total_cols
             else:
                 scores['type_stability'] = 0.0
@@ -364,7 +352,7 @@ class HeaderScorer:
             scores['type_stability'] = 0.0
 
         # 2. Densidad de texto vs números
-        total = row_info.non_empty_count or 0
+        total = row_info.non_empty_count
         if total > 0:
             text_ratio = row_info.text_count / total
             number_ratio = row_info.number_count / total
@@ -373,9 +361,9 @@ class HeaderScorer:
             scores['text_density'] = 0.0
 
         # 3. Penalización por vacíos
-        max_col = row_info.max_col or 0
-        if max_col > 0:
-            scores['empty_penalty'] = 1.0 - (row_info.empty_count / max_col)
+        total_cells = len(row_info.cells)
+        if total_cells > 0:
+            scores['empty_penalty'] = 1.0 - (row_info.empty_count / total_cells)
         else:
             scores['empty_penalty'] = 0.0
 
@@ -390,8 +378,8 @@ class HeaderScorer:
         scores['style'] = style_score
 
         # 5. Taxonomía
-        if row_info.max_col > 0:
-            headers = [row_info.cells[col].value for col in range(row_info.max_col) if col < len(row_info.cells)]
+        if row_info.non_empty_count > 0:
+            headers = [cell.value for cell in row_info.cells if cell.value is not None and cell.value.strip()]
             if headers:
                 mapeo, conf = self.taxonomy_validator.validate(headers)
                 scores['taxonomy'] = mapeo * 0.7 + conf * 0.3
@@ -519,8 +507,9 @@ class ExcelImporter:
         for row_idx in candidates:
             if row_idx < len(rows_info):
                 row_info = rows_info[row_idx]
-                # Usar max_col de row_info para limitar el escaneo de estilo
-                style_info = StyleAnalyzer.row_style_info(worksheet, row_idx + 1, row_info.max_col or 1)
+                # Usar len(row_info.cells) como número de columnas para el estilo
+                num_cols = len(row_info.cells)
+                style_info = StyleAnalyzer.row_style_info(worksheet, row_idx + 1, num_cols)
                 score = self.header_scorer.score_candidate(row_info, style_info, rows_info)
                 scores[row_idx] = score
 
