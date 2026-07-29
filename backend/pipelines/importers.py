@@ -1,5 +1,6 @@
 """
-Módulo de Importadores - Versión final con detección robusta de encabezados.
+Módulo de Importadores - Refactorizado con detección robusta de encabezados
+Basado en análisis de Gemini (sistema de votación por tokens y densidad de texto).
 """
 import pandas as pd
 import io
@@ -7,10 +8,9 @@ import re
 import unicodedata
 from typing import Dict, List, Union, Optional
 from pathlib import Path
-from backend.domain.taxonomy import TAXONOMY
 
 class Importer:
-    """Importador con detección inteligente de encabezados, hoja por hoja."""
+    """Importador con detección inteligente de encabezados por sistema de votación."""
 
     @staticmethod
     def read(file_path: Union[str, Path]) -> pd.DataFrame:
@@ -33,7 +33,8 @@ class Importer:
 
     @staticmethod
     def _read_excel_all_sheets(file_path: Path) -> pd.DataFrame:
-        sheets_dict = pd.read_excel(file_path, sheet_name=None, header=None, engine='openpyxl' if file_path.suffix == '.xlsx' else 'xlrd')
+        engine = 'openpyxl' if file_path.suffix == '.xlsx' else 'xlrd'
+        sheets_dict = pd.read_excel(file_path, sheet_name=None, header=None, engine=engine)
         return Importer._combine_sheets_with_auto_header(sheets_dict)
 
     @staticmethod
@@ -45,41 +46,29 @@ class Importer:
     def _combine_sheets_with_auto_header(sheets_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         all_dfs = []
         for sheet_name, df_raw in sheets_dict.items():
-            if df_raw.empty:
+            # 1. Limpieza inicial: eliminar filas/columnas completamente vacías
+            df_cleaned = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
+            if df_cleaned.empty:
                 continue
 
-            # Detectar la fila de encabezados para esta hoja
-            header_row = Importer._detect_header_row_sheet(df_raw)
-            
-            # Extraer encabezados y datos
-            headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
-            data_rows = df_raw.iloc[header_row + 1:].copy()
-            data_rows.columns = headers
+            # 2. Detectar índice real de la fila de encabezados
+            header_row_idx = Importer._detect_header_row_sheet(df_cleaned)
+            if header_row_idx is None:
+                # Si no se detecta, se omite la hoja (se puede registrar en logs)
+                continue
 
-            # Limpiar nombres de columnas
+            # 3. Extraer encabezados y aislar los datos puros
+            headers = df_cleaned.loc[header_row_idx].astype(str).str.strip().tolist()
+            data_rows = df_cleaned.loc[header_row_idx + 1:].copy()
+
+            # 4. Limpieza de nombres de columnas
             clean_headers = Importer._clean_column_names(headers)
             data_rows.columns = clean_headers
 
-            # Eliminar filas vacías
+            # 5. Descartar filas vacías dentro de los datos
             data_rows = data_rows.dropna(how='all')
             if data_rows.empty:
                 continue
-
-            # Verificar si los nombres son todos "Unnamed" - si es así, reintentar con fila 4
-            unnamed_ratio = sum(1 for h in clean_headers if h.startswith('columna_')) / len(clean_headers) if clean_headers else 1
-            if unnamed_ratio > 0.8:
-                # Reintentar con fila 4 (la que funciona en el archivo de ejemplo)
-                fallback_row = 4
-                if len(df_raw) > fallback_row:
-                    headers_fb = df_raw.iloc[fallback_row].astype(str).str.strip().tolist()
-                    data_rows = df_raw.iloc[fallback_row + 1:].copy()
-                    data_rows.columns = headers_fb
-                    clean_headers_fb = Importer._clean_column_names(headers_fb)
-                    data_rows.columns = clean_headers_fb
-                    data_rows = data_rows.dropna(how='all')
-                    if not data_rows.empty and all(h.startswith('columna_') for h in clean_headers_fb) == False:
-                        clean_headers = clean_headers_fb
-                        header_row = fallback_row
 
             data_rows['hoja_origen'] = sheet_name
             all_dfs.append(data_rows)
@@ -91,82 +80,101 @@ class Importer:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        if not isinstance(text, str):
+        if pd.isna(text):
             return ""
-        text = text.lower()
+        text = str(text).lower().strip()
         nfkd = unicodedata.normalize('NFKD', text)
         return "".join(c for c in nfkd if not unicodedata.combining(c))
 
     @staticmethod
-    def _detect_header_row_sheet(df: pd.DataFrame) -> int:
+    def _detect_header_row_sheet(df: pd.DataFrame) -> Optional[int]:
         """
-        Detecta la fila de encabezados en una hoja específica.
-        Estrategia: buscar la fila que contenga al menos una palabra clave fuerte
-        y tenga la mayor cantidad de celdas no vacías.
+        Detecta la fila de encabezados utilizando un sistema de votación basado en:
+        - Match exacto de palabras clave (evita subcadenas falsas).
+        - Exclusión de filas de metadatos (requiere mínimo de celdas no vacías).
+        - Densidad de strings vs números.
         """
-        strong_keywords = ['codigo', 'modelo', 'categoria', 'descripcion', 'precio', 'iva', 'ean', 'sku', 'código', 'descripción']
-        extra_keywords = ['foto', 'herramienta', 'sugerido', 'cuotas', 'costo', 'neto', 'marca', 'denominación']
-        all_keywords = set(strong_keywords + extra_keywords)
+        # Palabras clave del dominio comercial/ferretero
+        taxonomy_keywords = {
+            'codigo', 'cod', 'modelo', 'categoria', 'descripcion', 'desc',
+            'precio', 'pr', 'lista', 'iva', 'ean', 'sku', 'costo', 'neto',
+            'marca', 'rubro', 'familia', 'descuento', 'stock', 'código',
+            'descripción', 'denominación'
+        }
 
-        candidates = []
-        for row_idx in range(min(50, len(df))):
-            row_values = df.iloc[row_idx].astype(str).str.strip().tolist()
-            valid = [v for v in row_values if v and v not in ['nan', 'None', '']]
-            if not valid:
+        best_score = -1
+        best_row_idx = None
+
+        # Limitar la búsqueda a las primeras 35 filas para rendimiento
+        head_df = df.head(35)
+
+        for idx, row in head_df.iterrows():
+            row_values = row.dropna().astype(str).tolist()
+            total_cells = len(row_values)
+
+            # REGLA 1: Ignorar filas con menos de 3 celdas llenas (suelen ser títulos o metadatos)
+            if total_cells < 3:
                 continue
 
-            non_empty = len(valid)
-            has_strong = False
-            keyword_score = 0
-            numeric_count = 0
+            keyword_hits = 0
+            string_cells = 0
 
-            for val in valid:
+            for val in row_values:
                 norm_val = Importer._normalize_text(val)
-                if any(kw in norm_val for kw in strong_keywords):
-                    has_strong = True
-                    keyword_score += 3
-                elif any(kw in norm_val for kw in extra_keywords):
-                    keyword_score += 1
-                if re.match(r'^[\d.,]+$', norm_val.replace(',', '').replace('.', '')):
-                    numeric_count += 1
+                # Tokenizar por palabras para match exacto usando regex boundary (\b)
+                words = set(re.findall(r'\b\w+\b', norm_val))
 
-            # Bonus especial por "ean"
-            if any('ean' in Importer._normalize_text(v) for v in valid):
-                keyword_score += 10
+                # Intersección de tokens con nuestra taxonomía
+                if words.intersection(taxonomy_keywords):
+                    keyword_hits += 1
 
-            # Penalizar si hay muchos números
-            penalty = numeric_count / max(1, non_empty)
-            score = keyword_score * 2 + non_empty - penalty * 5
+                # Chequeo de densidad de texto (los encabezados rara vez son números puros)
+                is_numeric = bool(re.match(r'^-?\d+$', re.sub(r'[.,]', '', norm_val)))
+                if not is_numeric and len(norm_val) > 1:
+                    string_cells += 1
 
-            if has_strong or keyword_score > 2:
-                candidates.append((row_idx, score, non_empty))
+            string_ratio = string_cells / total_cells if total_cells > 0 else 0
 
-        if candidates:
-            # Elegir el candidato con mayor puntuación, desempatar por non_empty
-            best = max(candidates, key=lambda x: (x[1], x[2]))
-            return best[0]
+            # REGLA 2: Sistema de votación (Score)
+            # - Multiplicador alto para matches de taxonomía (10 puntos)
+            # - Multiplicador medio para densidad de texto (5 puntos)
+            # - Multiplicador bajo para cantidad de columnas (0.1 puntos, desempate)
+            score = (keyword_hits * 10) + (string_ratio * 5) + (total_cells * 0.1)
 
-        # Fallback: fila con más celdas no vacías
-        max_non_empty = 0
-        best_row = 0
-        for row_idx in range(min(30, len(df))):
-            non_empty = df.iloc[row_idx].count()
-            if non_empty > max_non_empty:
-                max_non_empty = non_empty
-                best_row = row_idx
-        return best_row
+            # REGLA 3: Super-Bonus: si la fila tiene EAN/SKU Y un campo financiero, es indiscutible
+            row_text_joined = " ".join([Importer._normalize_text(v) for v in row_values])
+            has_id = 'ean' in row_text_joined or 'sku' in row_text_joined
+            has_money = 'precio' in row_text_joined or 'costo' in row_text_joined or 'neto' in row_text_joined
+            if has_id and has_money:
+                score += 25
+
+            # Guardamos el mejor candidato (exigimos al menos 1 keyword hit para considerarlo)
+            if score > best_score and keyword_hits > 0:
+                best_score = score
+                best_row_idx = idx
+
+        return best_row_idx
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
         cleaned = []
-        for h in headers:
+        seen = set()
+        for i, h in enumerate(headers):
             h = str(h).strip()
-            # Eliminar caracteres especiales, mantener letras y números
+            # Mantener solo letras, números y espacios (eliminar símbolos como $, %, etc.)
             h = re.sub(r'[^a-zA-Z0-9áéíóúñüÁÉÍÓÚÑÜ\s]', '', h)
-            h = h.replace(' ', '_').lower()
             h = Importer._normalize_text(h)
-            h = re.sub(r'_+', '_', h)
-            if not h:
-                h = f"columna_{len(cleaned)}"
+            h = h.replace(' ', '_')
+            h = re.sub(r'_+', '_', h)   # Eliminar guiones bajos múltiples
+            h = h.strip('_')            # Eliminar guiones al inicio o final
+
+            # Si queda vacío o es 'nan', asignar nombre genérico
+            if not h or h == 'nan':
+                h = f"columna_{i}"
+
+            # Evitar duplicados
+            if h in seen:
+                h = f"{h}_{i}"
+            seen.add(h)
             cleaned.append(h)
         return cleaned
