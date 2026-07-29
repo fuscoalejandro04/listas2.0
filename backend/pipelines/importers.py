@@ -1,16 +1,17 @@
 """
-Módulo de Importadores - Refactorizado con detección robusta de encabezados
-Basado en análisis de Gemini (sistema de votación por tokens y densidad de texto).
+Módulo de Importadores - Estrategia híbrida: Bottom-Up (tipos de datos) + Taxonomía Inversa.
+Detección robusta de encabezados sin heurísticas de palabras clave.
 """
 import pandas as pd
 import io
 import re
-import unicodedata
 from typing import Dict, List, Union, Optional
 from pathlib import Path
+from backend.domain.taxonomy import TAXONOMY
+from backend.pipelines.detectors import ColumnMapper  # Para validar mapeo
 
 class Importer:
-    """Importador con detección inteligente de encabezados por sistema de votación."""
+    """Importador con detección inteligente de encabezados basada en tipos de datos y taxonomía."""
 
     @staticmethod
     def read(file_path: Union[str, Path]) -> pd.DataFrame:
@@ -33,8 +34,8 @@ class Importer:
 
     @staticmethod
     def _read_excel_all_sheets(file_path: Path) -> pd.DataFrame:
-        engine = 'openpyxl' if file_path.suffix == '.xlsx' else 'xlrd'
-        sheets_dict = pd.read_excel(file_path, sheet_name=None, header=None, engine=engine)
+        sheets_dict = pd.read_excel(file_path, sheet_name=None, header=None,
+                                    engine='openpyxl' if Path(file_path).suffix == '.xlsx' else 'xlrd')
         return Importer._combine_sheets_with_auto_header(sheets_dict)
 
     @staticmethod
@@ -46,26 +47,41 @@ class Importer:
     def _combine_sheets_with_auto_header(sheets_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         all_dfs = []
         for sheet_name, df_raw in sheets_dict.items():
-            # 1. Limpieza inicial: eliminar filas/columnas completamente vacías
-            df_cleaned = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
-            if df_cleaned.empty:
+            # Limpiar filas/columnas completamente vacías
+            df_clean = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
+            if df_clean.empty:
                 continue
 
-            # 2. Detectar índice real de la fila de encabezados
-            header_row_idx = Importer._detect_header_row_sheet(df_cleaned)
-            if header_row_idx is None:
-                # Si no se detecta, se omite la hoja (se puede registrar en logs)
-                continue
+            # 1. Intentar detección por tipos de datos (Bottom-Up)
+            header_row = Importer._find_header_by_data_types(df_clean)
 
-            # 3. Extraer encabezados y aislar los datos puros
-            headers = df_cleaned.loc[header_row_idx].astype(str).str.strip().tolist()
-            data_rows = df_cleaned.loc[header_row_idx + 1:].copy()
+            # 2. Validar con taxonomía
+            if header_row is not None:
+                header_candidates = [header_row]
+                # Si la validación falla, probar filas cercanas
+                for offset in [-1, 1, -2, 2]:
+                    candidate = header_row + offset
+                    if 0 <= candidate < len(df_clean):
+                        header_candidates.append(candidate)
+                # Elegir la que mejor mapee a la taxonomía
+                best_row = Importer._select_best_by_taxonomy(df_clean, header_candidates)
+                if best_row is not None:
+                    header_row = best_row
 
-            # 4. Limpieza de nombres de columnas
+            # 3. Si aún no se encontró, usar taxonomía inversa pura
+            if header_row is None:
+                header_row = Importer._find_header_by_taxonomy_only(df_clean)
+
+            if header_row is None:
+                # Fallback extremo: usar fila con más celdas no vacías
+                header_row = Importer._fallback_max_non_empty(df_clean)
+
+            # Extraer encabezados y datos
+            headers = df_clean.loc[header_row].astype(str).str.strip().tolist()
+            data_rows = df_clean.loc[header_row + 1:].copy()
+
             clean_headers = Importer._clean_column_names(headers)
             data_rows.columns = clean_headers
-
-            # 5. Descartar filas vacías dentro de los datos
             data_rows = data_rows.dropna(how='all')
             if data_rows.empty:
                 continue
@@ -75,106 +91,129 @@ class Importer:
 
         if not all_dfs:
             raise ValueError("No se encontraron hojas con datos válidos.")
-
         return pd.concat(all_dfs, ignore_index=True)
 
     @staticmethod
-    def _normalize_text(text: str) -> str:
-        if pd.isna(text):
-            return ""
-        text = str(text).lower().strip()
-        nfkd = unicodedata.normalize('NFKD', text)
-        return "".join(c for c in nfkd if not unicodedata.combining(c))
+    def _find_header_by_data_types(df: pd.DataFrame) -> Optional[int]:
+        """
+        Detecta la fila donde los tipos de datos por columna se vuelven consistentes.
+        Retorna el índice de la fila de encabezados (la anterior al inicio de datos).
+        """
+        # Tomar primeras 50 filas para análisis
+        sample = df.head(50)
+        if len(sample) < 2:
+            return None
+
+        # Calcular el tipo de dato inferido para cada celda (usando pandas)
+        # Creamos una matriz de tipos
+        type_matrix = sample.applymap(lambda x: pd.api.types.infer_dtype([x], skipna=True))
+
+        # Función para medir la "consistencia" de una fila: cuántas columnas tienen el mismo tipo
+        # que la fila siguiente (transición suave)
+        scores = []
+        for i in range(len(type_matrix) - 1):
+            row_types = type_matrix.iloc[i]
+            next_row_types = type_matrix.iloc[i + 1]
+            # Comparar tipo por columna (ignorando NaN)
+            matches = 0
+            total = 0
+            for col in row_types.index:
+                if pd.notna(row_types[col]) and pd.notna(next_row_types[col]):
+                    total += 1
+                    if row_types[col] == next_row_types[col]:
+                        matches += 1
+            if total > 0:
+                similarity = matches / total
+                scores.append((i, similarity))
+            else:
+                scores.append((i, 0.0))
+
+        # Buscar la fila donde la similitud es máxima (el cambio de tipos se estabiliza)
+        # La fila de encabezados suele estar justo antes de que los tipos se vuelvan homogéneos
+        if not scores:
+            return None
+
+        # Ordenar por similitud descendente
+        scores.sort(key=lambda x: x[1], reverse=True)
+        best_row_idx = scores[0][0]
+
+        # La fila de encabezados es la anterior a la primera fila con alta consistencia
+        # Pero si la mejor fila es la 0, entonces encabezado es 0 también
+        if best_row_idx == 0:
+            return 0
+
+        # Buscar la primera fila donde la consistencia supera un umbral alto (ej. 0.7)
+        threshold = 0.7
+        for i, sim in sorted(scores, key=lambda x: x[0]):
+            if sim >= threshold:
+                # La fila de encabezados es la anterior (i)
+                return i
+
+        # Si no se encuentra umbral, usar la fila con mayor similitud - 1
+        return best_row_idx
 
     @staticmethod
-    def _detect_header_row_sheet(df: pd.DataFrame) -> Optional[int]:
-        """
-        Detecta la fila de encabezados utilizando un sistema de votación basado en:
-        - Match exacto de palabras clave (evita subcadenas falsas).
-        - Exclusión de filas de metadatos (requiere mínimo de celdas no vacías).
-        - Densidad de strings vs números.
-        """
-        # Palabras clave del dominio comercial/ferretero
-        taxonomy_keywords = {
-            'codigo', 'cod', 'modelo', 'categoria', 'descripcion', 'desc',
-            'precio', 'pr', 'lista', 'iva', 'ean', 'sku', 'costo', 'neto',
-            'marca', 'rubro', 'familia', 'descuento', 'stock', 'código',
-            'descripción', 'denominación'
-        }
-
+    def _select_best_by_taxonomy(df: pd.DataFrame, candidate_rows: List[int]) -> Optional[int]:
+        """Evalúa los candidatos y elige el que mejor mapea a la taxonomía."""
+        mapper = ColumnMapper(confidence_threshold=0.0)  # Sin umbral mínimo
         best_score = -1
-        best_row_idx = None
+        best_row = None
 
-        # Limitar la búsqueda a las primeras 35 filas para rendimiento
-        head_df = df.head(35)
-
-        for idx, row in head_df.iterrows():
-            row_values = row.dropna().astype(str).tolist()
-            total_cells = len(row_values)
-
-            # REGLA 1: Ignorar filas con menos de 3 celdas llenas (suelen ser títulos o metadatos)
-            if total_cells < 3:
+        for row_idx in candidate_rows:
+            if row_idx < 0 or row_idx >= len(df):
                 continue
+            headers = df.loc[row_idx].astype(str).str.strip().tolist()
+            # Crear un DataFrame ficticio con esos encabezados para mapear
+            dummy_df = pd.DataFrame([headers], columns=headers)
+            mapping = mapper.map_columns(dummy_df)
+            # Calcular puntuación: porcentaje de columnas mapeadas
+            mapped = sum(1 for v in mapping.values() if v[0] is not None)
+            total = len(mapping)
+            if total == 0:
+                continue
+            score = mapped / total
+            # Bonus si hay columnas con confianza alta
+            avg_conf = sum(v[1] for v in mapping.values() if v[0] is not None) / max(1, mapped)
+            final_score = score * 0.7 + avg_conf * 0.3
+            if final_score > best_score:
+                best_score = final_score
+                best_row = row_idx
 
-            keyword_hits = 0
-            string_cells = 0
+        return best_row
 
-            for val in row_values:
-                norm_val = Importer._normalize_text(val)
-                # Tokenizar por palabras para match exacto usando regex boundary (\b)
-                words = set(re.findall(r'\b\w+\b', norm_val))
+    @staticmethod
+    def _find_header_by_taxonomy_only(df: pd.DataFrame) -> Optional[int]:
+        """Fallback: busca la fila que maximiza mapeo a taxonomía entre las primeras 20."""
+        candidates = list(range(min(20, len(df))))
+        return Importer._select_best_by_taxonomy(df, candidates)
 
-                # Intersección de tokens con nuestra taxonomía
-                if words.intersection(taxonomy_keywords):
-                    keyword_hits += 1
-
-                # Chequeo de densidad de texto (los encabezados rara vez son números puros)
-                is_numeric = bool(re.match(r'^-?\d+$', re.sub(r'[.,]', '', norm_val)))
-                if not is_numeric and len(norm_val) > 1:
-                    string_cells += 1
-
-            string_ratio = string_cells / total_cells if total_cells > 0 else 0
-
-            # REGLA 2: Sistema de votación (Score)
-            # - Multiplicador alto para matches de taxonomía (10 puntos)
-            # - Multiplicador medio para densidad de texto (5 puntos)
-            # - Multiplicador bajo para cantidad de columnas (0.1 puntos, desempate)
-            score = (keyword_hits * 10) + (string_ratio * 5) + (total_cells * 0.1)
-
-            # REGLA 3: Super-Bonus: si la fila tiene EAN/SKU Y un campo financiero, es indiscutible
-            row_text_joined = " ".join([Importer._normalize_text(v) for v in row_values])
-            has_id = 'ean' in row_text_joined or 'sku' in row_text_joined
-            has_money = 'precio' in row_text_joined or 'costo' in row_text_joined or 'neto' in row_text_joined
-            if has_id and has_money:
-                score += 25
-
-            # Guardamos el mejor candidato (exigimos al menos 1 keyword hit para considerarlo)
-            if score > best_score and keyword_hits > 0:
-                best_score = score
-                best_row_idx = idx
-
-        return best_row_idx
+    @staticmethod
+    def _fallback_max_non_empty(df: pd.DataFrame) -> int:
+        """Último recurso: fila con más celdas no vacías."""
+        max_count = -1
+        best_row = 0
+        for idx in range(min(30, len(df))):
+            count = df.iloc[idx].count()
+            if count > max_count:
+                max_count = count
+                best_row = idx
+        return best_row
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
         cleaned = []
-        seen = set()
         for i, h in enumerate(headers):
             h = str(h).strip()
-            # Mantener solo letras, números y espacios (eliminar símbolos como $, %, etc.)
+            # Eliminar caracteres especiales, mantener letras, números, espacios
             h = re.sub(r'[^a-zA-Z0-9áéíóúñüÁÉÍÓÚÑÜ\s]', '', h)
-            h = Importer._normalize_text(h)
-            h = h.replace(' ', '_')
-            h = re.sub(r'_+', '_', h)   # Eliminar guiones bajos múltiples
-            h = h.strip('_')            # Eliminar guiones al inicio o final
-
-            # Si queda vacío o es 'nan', asignar nombre genérico
+            # Normalizar: minúsculas, reemplazar espacios por guiones bajos
+            h = h.lower().replace(' ', '_')
+            # Eliminar acentos
+            import unicodedata
+            nfkd = unicodedata.normalize('NFKD', h)
+            h = "".join(c for c in nfkd if not unicodedata.combining(c))
+            h = re.sub(r'_+', '_', h).strip('_')
             if not h or h == 'nan':
                 h = f"columna_{i}"
-
-            # Evitar duplicados
-            if h in seen:
-                h = f"{h}_{i}"
-            seen.add(h)
             cleaned.append(h)
         return cleaned
