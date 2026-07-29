@@ -498,12 +498,17 @@ class ExcelImporter:
 
     def _read_sheet_with_pandas(self, filepath: Path, sheet_name: str, header_result: HeaderDetectionResult) -> pd.DataFrame:
         header_row = header_result.header_row
-        return pd.read_excel(
+        df = pd.read_excel(
             filepath,
             sheet_name=sheet_name,
             header=header_row,
             engine='openpyxl'
         )
+        # 🔥 SOLUCIÓN CLAVE: Forzar que todos los nombres de columna sean string
+        # Esto evita que pandas asigne tipos int a columnas sin nombre,
+        # lo que causa errores de 'int' object has no attribute 'strip' en detectors.py
+        df.columns = df.columns.astype(str)
+        return df
 
 # ============================================================
 # FUNCIÓN DE ENTRADA
