@@ -1,3 +1,24 @@
+import sys
+import os
+from pathlib import Path
+
+# 1. Calcular la ruta absoluta de la raíz del repositorio (listas2.0)
+root_path = str(Path(__file__).resolve().parent.parent)
+
+# 2. Inyectar la ruta en sys.path ANTES de importar cualquier módulo interno
+if root_path not in sys.path:
+    sys.path.insert(0, root_path)
+
+# 3. Importar librerías de terceros
+import streamlit as st
+import pandas as pd
+import io
+
+# 4. AHORA SÍ: Importar tus módulos de backend
+from backend.domain.taxonomy import TAXONOMY
+from backend.pipelines.detectors import ColumnMapper
+from backend.pipelines.processor import PipelineProcessor
+
 """
 Módulo Procesador - Orquesta todo el pipeline ETL.
 Ya no depende de importers, recibe el DataFrame directamente.
