@@ -5,8 +5,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 import pandas as pd
 import io
+
+# Importar el nuevo importador profesional
+from backend.pipelines.importers import import_excel
 from backend.domain.taxonomy import TAXONOMY
-from backend.pipelines.importers import Importer
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.processor import PipelineProcessor
 
@@ -18,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🧠 AI Product Data Platform (AIPDP)")
-st.caption("Sistema central de conocimiento sobre productos - Pipeline ETL Activo")
+st.caption("Sistema central de conocimiento sobre productos - Pipeline ETL Activo con importación profesional")
 
 # Sidebar
 with st.sidebar:
@@ -48,22 +50,47 @@ with col1:
     if uploaded_file is not None:
         with st.spinner("⏳ Procesando archivo... Esto puede tomar unos segundos."):
             try:
-                # 1. Leer el archivo (TODAS las hojas si es Excel)
-                df_raw = Importer.read_from_bytes(uploaded_file.read(), uploaded_file.name)
+                # =================================================
+                # 1. IMPORTACIÓN PROFESIONAL (HOJA POR HOJA)
+                # =================================================
+                import_result = import_excel(uploaded_file.read(), uploaded_file.name)
                 
-                # Mostrar información de las hojas (si existe columna hoja_origen)
-                if 'hoja_origen' in df_raw.columns:
-                    hoja_counts = df_raw['hoja_origen'].value_counts().to_dict()
-                    st.info(f"📂 Archivo procesado con {len(hoja_counts)} hojas: {', '.join([f'{k}: {v} filas' for k, v in hoja_counts.items()])}")
-                else:
-                    st.info(f"📄 Archivo procesado con {df_raw.shape[0]} filas y {df_raw.shape[1]} columnas.")
+                # Mostrar resumen de la importación
+                if import_result.failed_sheets:
+                    st.warning(f"⚠️ {len(import_result.failed_sheets)} hoja(s) fallaron al importar.")
+                    for failed in import_result.failed_sheets:
+                        st.caption(f"- {failed.sheet_name}: {failed.error}")
                 
-                # 2. Ejecutar pipeline completo
+                if not import_result.successful_sheets:
+                    st.error("❌ No se pudo procesar ninguna hoja del archivo.")
+                    st.stop()
+                
+                # Combinar todas las hojas exitosas en un solo DataFrame
+                dfs = []
+                for sheet_result in import_result.successful_sheets:
+                    if sheet_result.dataframe is not None and not sheet_result.dataframe.empty:
+                        df = sheet_result.dataframe.copy()
+                        df['hoja_origen'] = sheet_result.sheet_name
+                        dfs.append(df)
+                
+                if not dfs:
+                    st.error("❌ Las hojas procesadas no contienen datos válidos.")
+                    st.stop()
+                
+                df_raw = pd.concat(dfs, ignore_index=True)
+                
+                # Información del archivo procesado
+                sheet_names = [sr.sheet_name for sr in import_result.successful_sheets]
+                st.info(f"📂 Archivo procesado con {len(sheet_names)} hojas: {', '.join(sheet_names[:5])}{'...' if len(sheet_names) > 5 else ''}. Total de filas: {df_raw.shape[0]}, columnas: {df_raw.shape[1]}")
+                
+                # =================================================
+                # 2. PIPELINE ETL (DETECCIÓN, NORMALIZACIÓN, VALIDACIÓN)
+                # =================================================
                 processor = PipelineProcessor(confidence_threshold=0.6)
-                result = processor.process(df_raw)
+                process_result = processor.process(df_raw)
                 
-                # 3. Mostrar resumen ejecutivo
-                summary = result['summary']
+                # Resumen ejecutivo
+                summary = process_result['summary']
                 st.success(f"✅ Procesamiento completado: {summary['total_rows']} productos")
                 
                 # Métricas principales
@@ -73,60 +100,57 @@ with col1:
                 col_met3.metric("Advertencias", summary['warning_rows'], delta="⚡")
                 col_met4.metric("Calidad", f"{summary['quality_score']*100:.0f}%", delta="📈")
                 
-                # 4. Mapeo de columnas
+                # 3. Mapeo de columnas
                 with st.expander("🔍 Mapeo de Columnas (Confianza)"):
                     mapping_df = pd.DataFrame([
                         {"Columna Origen": col, "Campo Taxonomía": field if field else "❓ No detectado", "Confianza": f"{conf*100:.0f}%"}
-                        for col, (field, conf) in result['mapping'].items()
+                        for col, (field, conf) in process_result['mapping'].items()
                     ])
                     st.dataframe(mapping_df, use_container_width=True)
                 
-                # 5. Vista previa de productos normalizados
+                # 4. Vista previa de productos normalizados
                 with st.expander("📊 Productos Normalizados (Vista previa)", expanded=True):
-                    if result['products']:
-                        df_normalized = pd.DataFrame(result['products'])
-                        # Si existe hoja_origen, mostrarla
-                        if 'hoja_origen' in df_normalized.columns:
-                            st.dataframe(df_normalized[['codigo', 'nombre_articulo', 'precio_lista', 'hoja_origen']].head(20), use_container_width=True)
-                        else:
-                            st.dataframe(df_normalized.head(20), use_container_width=True)
-                        st.caption(f"Mostrando 20 de {len(result['products'])} productos")
+                    if process_result['products']:
+                        df_normalized = pd.DataFrame(process_result['products'])
+                        # Mostrar columnas relevantes
+                        cols_to_show = ['codigo', 'nombre_articulo', 'precio_lista', 'hoja_origen'] if 'hoja_origen' in df_normalized.columns else ['codigo', 'nombre_articulo', 'precio_lista']
+                        available_cols = [col for col in cols_to_show if col in df_normalized.columns]
+                        st.dataframe(df_normalized[available_cols].head(20), use_container_width=True)
+                        st.caption(f"Mostrando 20 de {len(process_result['products'])} productos")
                 
-                # 6. Reporte de calidad
+                # 5. Reporte de validación
                 with st.expander("⚠️ Reporte de Calidad y Validación"):
-                    issues = result['validation_report']['issues']
+                    issues = process_result['validation_report']['issues']
                     if issues:
                         issues_df = pd.DataFrame(issues)
                         st.dataframe(issues_df, use_container_width=True)
                     else:
                         st.success("✅ No se encontraron errores ni advertencias.")
                     
-                    if result['duplicates']:
-                        st.warning(f"⚠️ Se detectaron {len(result['duplicates'])} productos con código duplicado.")
-                        dup_df = pd.DataFrame(result['duplicates'])
+                    if process_result['duplicates']:
+                        st.warning(f"⚠️ Se detectaron {len(process_result['duplicates'])} productos con código duplicado.")
+                        dup_df = pd.DataFrame(process_result['duplicates'])
                         st.dataframe(dup_df)
                 
-                # 7. Descarga con formato Excel mejorado
+                # 6. Descarga en Excel y CSV
                 st.subheader("📥 Descargar Catálogo Normalizado")
-                # Crear un Excel con dos hojas: datos y validaciones
+                
+                # Excel con múltiples hojas
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     # Hoja de datos normalizados
-                    df_export = pd.DataFrame(result['products'])
+                    df_export = pd.DataFrame(process_result['products'])
                     df_export.to_excel(writer, sheet_name='Productos Normalizados', index=False)
                     
-                    # Hoja de validaciones (errores y advertencias)
+                    # Hoja de validaciones
                     if issues:
                         issues_df = pd.DataFrame(issues)
                         issues_df.to_excel(writer, sheet_name='Validaciones', index=False)
-                    else:
-                        # Hoja vacía con mensaje
-                        pd.DataFrame({"Mensaje": ["No se encontraron errores o advertencias."]}).to_excel(writer, sheet_name='Validaciones', index=False)
                     
-                    # Hoja de mapeo usado
+                    # Hoja de mapeo
                     mapping_export = pd.DataFrame([
                         {"Columna Origen": col, "Campo Taxonomía": field if field else "No detectado", "Confianza": f"{conf*100:.0f}%"}
-                        for col, (field, conf) in result['mapping'].items()
+                        for col, (field, conf) in process_result['mapping'].items()
                     ])
                     mapping_export.to_excel(writer, sheet_name='Mapeo de Columnas', index=False)
                 
@@ -138,8 +162,8 @@ with col1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                # También ofrecer CSV simple
-                csv_data = pd.DataFrame(result['products']).to_csv(index=False).encode('utf-8')
+                # CSV simple
+                csv_data = pd.DataFrame(process_result['products']).to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="📥 Descargar CSV (solo datos)",
                     data=csv_data,
@@ -157,7 +181,7 @@ with col2:
     st.metric("Productos en Memoria", "0")
     
     st.divider()
-    st.caption("⚡ Pipeline: Importar → Detectar → Normalizar → Validar")
+    st.caption("⚡ Pipeline: Importación Profesional → Detectar → Normalizar → Validar")
 
 st.divider()
-st.caption("AIPDP v0.3.0 - Soporte multi-hoja | Desarrollado bajo Clean Architecture + DDD")
+st.caption("AIPDP v0.5.0 - Importación profesional hoja por hoja")
