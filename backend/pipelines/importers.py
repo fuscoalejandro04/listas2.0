@@ -1,18 +1,18 @@
 """
-Excel Importer - Versión profesional con detección automática de regiones tabulares y encabezados.
+Módulo de Importadores - Versión profesional con detección automática de regiones tabulares y encabezados.
 Arquitectura modular, bajo consumo de memoria, alta precisión.
 """
 import re
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple, Set
+from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 from pathlib import Path
 import io
 import tempfile
 from collections import Counter
+from datetime import datetime
 
 # ============================================================
 # MODELOS
@@ -266,10 +266,8 @@ class TableRegionDetector:
 # TAXONOMY VALIDATOR
 # ============================================================
 
-# Importación diferida para evitar circular
 class TaxonomyValidator:
     def __init__(self):
-        # Importar ColumnMapper solo si está disponible
         try:
             from backend.pipelines.detectors import ColumnMapper
             self.mapper = ColumnMapper(confidence_threshold=0.0)
@@ -527,10 +525,7 @@ class ExcelImporter:
         )
 
     def _read_sheet_with_pandas(self, filepath: Path, sheet_name: str, header_result: HeaderDetectionResult) -> pd.DataFrame:
-        # header_result.header_row es 0-based. Para pandas, la fila de encabezado es header_row + 1 (1-based)
-        # Pero pandas usa 0-based para header, así que pasamos header_row directamente.
         header_row = header_result.header_row
-        # Leer desde el archivo original
         return pd.read_excel(
             filepath,
             sheet_name=sheet_name,
@@ -539,12 +534,13 @@ class ExcelImporter:
         )
 
 # ============================================================
-# FUNCIÓN DE REEMPLAZO PARA EL MÓDULO ACTUAL
+# FUNCIÓN DE ENTRADA PARA REEMPLAZAR EL IMPORTADOR ACTUAL
 # ============================================================
 
 def import_excel(data: bytes, filename: str) -> ImportResult:
     """
-    Función de entrada principal para reemplazar el importador actual.
+    Función principal para importar archivos Excel.
+    Retorna un objeto ImportResult con las hojas procesadas.
     """
     importer = ExcelImporter()
     return importer.import_from_bytes(data, filename)
