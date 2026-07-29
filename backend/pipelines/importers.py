@@ -1,6 +1,6 @@
 """
-Módulo de Importadores - Versión profesional con detección automática de regiones tabulares y encabezados.
-Arquitectura modular, bajo consumo de memoria, alta precisión.
+Módulo de Importadores - Versión definitiva para openpyxl read_only=True.
+Arquitectura en capas: Infraestructura (escáner), Dominio (modelos), Casos de uso (detectores y scorers).
 """
 import re
 import pandas as pd
@@ -9,13 +9,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 from pathlib import Path
-import io
 import tempfile
-from collections import Counter
 from datetime import datetime
 
 # ============================================================
-# MODELOS
+# CAPA DE DOMINIO (Modelos de datos)
 # ============================================================
 
 class CellType(Enum):
@@ -29,24 +27,23 @@ class CellType(Enum):
 
 @dataclass
 class CellInfo:
-    row: int
-    col: int
-    value: Optional[str] = None
-    cell_type: CellType = CellType.EMPTY
-    is_merged: bool = False
-    bold: bool = False
-    fill_color: Optional[str] = None
-    border_bottom: bool = False
+    col_idx: int          # Siempre int (0-based)
+    value: Any
+    cell_type: CellType
+    is_bold: bool = False
+    has_fill: bool = False
+    has_bottom_border: bool = False
 
 @dataclass
 class RowInfo:
-    index: int
-    cells: List[CellInfo]
+    index: int            # Siempre int (0-based)
+    cells: List[CellInfo] = field(default_factory=list)
     non_empty_count: int = 0
     text_count: int = 0
     number_count: int = 0
-    date_count: int = 0
-    empty_count: int = 0
+    bold_count: int = 0
+    fill_count: int = 0
+    border_count: int = 0
 
 @dataclass
 class HeaderDetectionResult:
@@ -75,10 +72,11 @@ class ImportResult:
     total_failed: int = 0
 
 # ============================================================
-# TYPE CLASSIFIER
+# CAPA DE INFRAESTRUCTURA (Adaptadores para openpyxl)
 # ============================================================
 
 class TypeClassifier:
+    """Clasifica el tipo de dato de una celda."""
     NUMBER_PATTERNS = [
         re.compile(r'^[+-]?\d{1,3}(?:\.\d{3})*(?:,\d+)?$'),
         re.compile(r'^[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?$'),
@@ -123,161 +121,121 @@ class TypeClassifier:
             if stripped.startswith('='):
                 return CellType.FORMULA
             return CellType.TEXT
-
         return CellType.TEXT
 
-# ============================================================
-# STYLE ANALYZER
-# ============================================================
-
-class StyleAnalyzer:
+class SafeStyleExtractor:
+    """Extrae estilos de forma segura en modo read_only."""
     @staticmethod
-    def get_cell_style_info(cell):
-        info = {
-            'bold': False,
-            'fill_color': None,
-            'border_bottom': False,
-        }
-        if cell.font:
-            if cell.font.bold is not None:
-                info['bold'] = cell.font.bold
-        if cell.fill and hasattr(cell.fill, 'start_color') and cell.fill.start_color:
-            if hasattr(cell.fill.start_color, 'rgb'):
-                info['fill_color'] = cell.fill.start_color.rgb
-        if cell.border and cell.border.bottom and cell.border.bottom.style:
-            info['border_bottom'] = True
-        return info
+    def is_bold(cell) -> bool:
+        try:
+            return bool(cell.font and cell.font.bold)
+        except Exception:
+            return False
 
     @staticmethod
-    def row_style_info(worksheet, row_idx: int, num_cols: int) -> dict:
-        result = {'bold_count': 0, 'colored_count': 0, 'has_bottom_border': False}
-        for col in range(1, num_cols + 1):
-            cell = worksheet.cell(row=row_idx, column=col)
-            style = StyleAnalyzer.get_cell_style_info(cell)
-            if style['bold']:
-                result['bold_count'] += 1
-            if style['fill_color']:
-                result['colored_count'] += 1
-            if style['border_bottom']:
-                result['has_bottom_border'] = True
-        return result
+    def has_fill(cell) -> bool:
+        try:
+            return bool(cell.fill and cell.fill.fill_type is not None and str(cell.fill.fill_type).lower() != 'none')
+        except Exception:
+            return False
 
-# ============================================================
-# WORKSHEET SCANNER
-# ============================================================
+    @staticmethod
+    def has_bottom_border(cell) -> bool:
+        try:
+            return bool(cell.border and cell.border.bottom and cell.border.bottom.style is not None)
+        except Exception:
+            return False
 
 class WorksheetScanner:
-    def __init__(self, worksheet, max_rows=100, max_cols=30):
-        self.worksheet = worksheet
-        self.max_rows = max_rows
-        self.max_cols = max_cols
-
-    def scan(self) -> List[RowInfo]:
+    """
+    Escáner de hoja que usa enumerate() para índices seguros.
+    Lee solo un bounding box (max_rows x max_cols) para rendimiento.
+    """
+    @staticmethod
+    def scan_head(ws, max_rows: int = 60, max_cols: int = 50) -> List[RowInfo]:
         rows_info = []
-        actual_max_col = min(self.max_cols, self.worksheet.max_column or 1)
-        
-        for row_idx in range(1, min(self.max_rows, self.worksheet.max_row) + 1):
-            cells = []
-            non_empty = text_count = number_count = date_count = empty_count = 0
-            for col_idx in range(1, actual_max_col + 1):
-                try:
-                    cell = self.worksheet.cell(row=row_idx, column=col_idx)
-                    value = cell.value
-                except Exception:
-                    value = None
-                
-                cell_type = TypeClassifier.classify(value)
-                cell_info = CellInfo(
-                    row=row_idx - 1,
-                    col=col_idx - 1,
-                    value=str(value) if value is not None else None,
-                    cell_type=cell_type,
-                    is_merged=False
-                )
-                cells.append(cell_info)
-                if cell_type != CellType.EMPTY:
+        for r_idx, row_cells in enumerate(ws.iter_rows(max_row=max_rows, max_col=max_cols, values_only=False)):
+            if r_idx >= max_rows:
+                break
+            cells_info = []
+            non_empty = 0
+            text_cnt = 0
+            num_cnt = 0
+            bold_cnt = 0
+            fill_cnt = 0
+            border_cnt = 0
+
+            for c_idx, cell in enumerate(row_cells):
+                if c_idx >= max_cols:
+                    break
+                val = cell.value
+                c_type = TypeClassifier.classify(val)
+                is_bold = SafeStyleExtractor.is_bold(cell)
+                has_fill = SafeStyleExtractor.has_fill(cell)
+                has_border = SafeStyleExtractor.has_bottom_border(cell)
+
+                if c_type != CellType.EMPTY:
                     non_empty += 1
-                    if cell_type == CellType.TEXT:
-                        text_count += 1
-                    elif cell_type == CellType.NUMBER:
-                        number_count += 1
-                    elif cell_type == CellType.DATE:
-                        date_count += 1
-                else:
-                    empty_count += 1
-            
-            row_info = RowInfo(
-                index=row_idx - 1,
-                cells=cells,
-                non_empty_count=non_empty,
-                text_count=text_count,
-                number_count=number_count,
-                date_count=date_count,
-                empty_count=empty_count,
-            )
-            rows_info.append(row_info)
+                    if c_type == CellType.TEXT:
+                        text_cnt += 1
+                    elif c_type == CellType.NUMBER:
+                        num_cnt += 1
+                if is_bold:
+                    bold_cnt += 1
+                if has_fill:
+                    fill_cnt += 1
+                if has_border:
+                    border_cnt += 1
+
+                cells_info.append(CellInfo(
+                    col_idx=c_idx,
+                    value=val,
+                    cell_type=c_type,
+                    is_bold=is_bold,
+                    has_fill=has_fill,
+                    has_bottom_border=has_border
+                ))
+
+            # Solo conservamos filas con al menos una celda no vacía o estilos relevantes
+            if non_empty > 0 or bold_cnt > 0 or fill_cnt > 0:
+                rows_info.append(RowInfo(
+                    index=r_idx,
+                    cells=cells_info,
+                    non_empty_count=non_empty,
+                    text_count=text_cnt,
+                    number_count=num_cnt,
+                    bold_count=bold_cnt,
+                    fill_count=fill_cnt,
+                    border_count=border_cnt
+                ))
+
         return rows_info
 
 # ============================================================
-# TABLE REGION DETECTOR
+# CAPA DE CASOS DE USO (Lógica de negocio)
 # ============================================================
 
 class TableRegionDetector:
+    """Detecta la región tabular basándose en densidad de datos."""
     @staticmethod
     def detect_table_start(rows_info: List[RowInfo]) -> Optional[int]:
-        if not rows_info or len(rows_info) < 2:
+        if not rows_info:
             return None
-        
-        # Filtrar filas con al menos una celda no vacía
-        valid_rows = [r for r in rows_info if r.non_empty_count > 0]
-        if len(valid_rows) < 2:
+        # Filtrar filas con al menos 2 celdas no vacías
+        valid_rows = [r for r in rows_info if r.non_empty_count >= 2]
+        if not valid_rows:
             return None
-        
-        window_size = 5
-        best_score = -1
-        best_start = None
-        
-        for start_idx in range(max(0, len(valid_rows) - window_size + 1)):
-            window = valid_rows[start_idx:start_idx + window_size]
-            if len(window) < 2:
-                continue
-            
-            # Determinar el número máximo de columnas en la ventana
-            max_cols_in_window = max(len(r.cells) for r in window)
-            if max_cols_in_window == 0:
-                continue
-            
-            col_ratios = {}
-            for col in range(max_cols_in_window):
-                types = []
-                for row in window:
-                    if col < len(row.cells):
-                        ct = row.cells[col].cell_type
-                        if ct != CellType.EMPTY:
-                            types.append(ct)
-                if types:
-                    counter = Counter(types)
-                    most_common = counter.most_common(1)[0][0]
-                    ratio = counter[most_common] / len(types)
-                    col_ratios[col] = (most_common, ratio)
-            
-            if col_ratios:
-                avg_ratio = sum(r for _, r in col_ratios.values()) / len(col_ratios)
-                non_empty_cols = sum(1 for col, (_, r) in col_ratios.items() if r > 0.5)
-                score = avg_ratio * (non_empty_cols / max(1, len(window[0].cells)))
-                if score > best_score:
-                    best_score = score
-                    best_start = start_idx
-        
-        if best_score < 0.3:
-            return None
-        return best_start
-
-# ============================================================
-# TAXONOMY VALIDATOR
-# ============================================================
+        # Buscar la primera fila donde la densidad de no-vacíos supere el 50% de la máxima
+        max_non_empty = max(r.non_empty_count for r in valid_rows)
+        threshold = max(3, int(max_non_empty * 0.5))
+        for r in valid_rows:
+            if r.non_empty_count >= threshold:
+                return r.index
+        # Fallback: primera fila con más de 2 celdas no vacías
+        return valid_rows[0].index
 
 class TaxonomyValidator:
+    """Valida candidatos contra la taxonomía de AIPDP."""
     def __init__(self):
         try:
             from backend.pipelines.detectors import ColumnMapper
@@ -288,7 +246,6 @@ class TaxonomyValidator:
     def validate(self, headers: List[str]) -> Tuple[float, float]:
         if not headers or self.mapper is None:
             return 0.0, 0.0
-        import pandas as pd
         dummy = pd.DataFrame([headers], columns=headers)
         mapping = self.mapper.map_columns(dummy)
         mapped = 0
@@ -302,126 +259,41 @@ class TaxonomyValidator:
             return 0.0, 0.0
         return mapped / total, total_conf / max(1, mapped)
 
-# ============================================================
-# HEADER CANDIDATE GENERATOR
-# ============================================================
-
-class HeaderCandidateGenerator:
-    @staticmethod
-    def generate_candidates(rows_info: List[RowInfo], table_start: Optional[int]) -> List[int]:
-        if table_start is None:
-            return list(range(min(10, len(rows_info))))
-        candidates = set()
-        if table_start > 0:
-            candidates.add(table_start - 1)
-        candidates.add(table_start)
-        for offset in range(-3, 4):
-            row = table_start + offset
-            if 0 <= row < len(rows_info):
-                candidates.add(row)
-        if not candidates:
-            candidates.update(range(min(5, len(rows_info))))
-        return sorted(candidates)
-
-# ============================================================
-# HEADER SCORER
-# ============================================================
-
 class HeaderScorer:
+    """Puntúa filas candidatas combinando densidad de texto, estilos y taxonomía."""
     def __init__(self):
         self.taxonomy_validator = TaxonomyValidator()
 
-    def score_candidate(self, row_info: RowInfo, style_info: dict, rows_info: List[RowInfo]) -> float:
-        scores = {}
-        
-        # 1. Estabilidad de tipos (comparar con la siguiente fila)
-        if row_info.index + 1 < len(rows_info):
-            next_row = rows_info[row_info.index + 1]
-            total_cols = min(len(row_info.cells), len(next_row.cells))
-            if total_cols > 0:
-                consistency = 0
-                for col in range(total_cols):
-                    t1 = row_info.cells[col].cell_type
-                    t2 = next_row.cells[col].cell_type
-                    if t1 == t2 and t1 != CellType.EMPTY:
-                        consistency += 1
-                scores['type_stability'] = consistency / total_cols
-            else:
-                scores['type_stability'] = 0.0
-        else:
-            scores['type_stability'] = 0.0
+    def score_candidate(self, row_info: RowInfo, rows_info: List[RowInfo]) -> float:
+        if row_info.non_empty_count < 2:
+            return -1000.0
 
-        # 2. Densidad de texto vs números
-        total = row_info.non_empty_count
-        if total > 0:
-            text_ratio = row_info.text_count / total
-            number_ratio = row_info.number_count / total
-            scores['text_density'] = text_ratio * 0.8 - number_ratio * 0.2
-        else:
-            scores['text_density'] = 0.0
-
-        # 3. Penalización por vacíos
-        total_cells = len(row_info.cells)
-        if total_cells > 0:
-            scores['empty_penalty'] = 1.0 - (row_info.empty_count / total_cells)
-        else:
-            scores['empty_penalty'] = 0.0
-
-        # 4. Estilos
-        style_score = 0.0
-        if style_info.get('bold_count', 0) > 0:
-            style_score += 0.3
-        if style_info.get('colored_count', 0) > 0:
-            style_score += 0.3
-        if style_info.get('has_bottom_border', False):
-            style_score += 0.4
-        scores['style'] = style_score
-
-        # 5. Taxonomía
-        if row_info.non_empty_count > 0:
-            headers = [cell.value for cell in row_info.cells if cell.value is not None and cell.value.strip()]
+        total_cells = len(row_info.cells) or 1
+        # 1. Densidad de texto vs números
+        text_ratio = (row_info.text_count or 0) / total_cells
+        # 2. Estilos visuales (negrita, relleno, borde)
+        style_bonus = (row_info.bold_count * 2) + (row_info.fill_count * 1.5) + (row_info.border_count * 1.0)
+        # 3. Taxonomía (si la fila tiene al menos 3 celdas no vacías)
+        taxonomy_score = 0.0
+        if row_info.non_empty_count >= 3:
+            headers = [cell.value for cell in row_info.cells if cell.value is not None and str(cell.value).strip()]
             if headers:
                 mapeo, conf = self.taxonomy_validator.validate(headers)
-                scores['taxonomy'] = mapeo * 0.7 + conf * 0.3
-            else:
-                scores['taxonomy'] = 0.0
-        else:
-            scores['taxonomy'] = 0.0
+                taxonomy_score = (mapeo * 0.7 + conf * 0.3) * 5.0  # peso extra
 
-        weights = {'type_stability': 0.25, 'text_density': 0.20, 'empty_penalty': 0.15, 'style': 0.15, 'taxonomy': 0.25}
-        final = 0.0
-        for key, val in scores.items():
-            val = max(0.0, min(1.0, val)) if isinstance(val, (int, float)) else 0.0
-            final += val * weights.get(key, 0.1)
-        return final
+        # 4. Validación con la fila siguiente (si existe)
+        next_idx = row_info.index + 1
+        next_bonus = 0.0
+        if next_idx < len(rows_info):
+            next_row = rows_info[next_idx]
+            if next_row.number_count > 2:  # si la fila siguiente tiene números, refuerza la hipótesis
+                next_bonus = 3.0
 
-# ============================================================
-# CONFIDENCE CALCULATOR
-# ============================================================
-
-class ConfidenceCalculator:
-    @staticmethod
-    def calculate(candidates_scores: dict, table_start: Optional[int], strategy: str = "hybrid") -> Optional[HeaderDetectionResult]:
-        if not candidates_scores:
-            return None
-        best_row = max(candidates_scores, key=candidates_scores.get)
-        best_score = candidates_scores[best_row]
-        sorted_scores = sorted(candidates_scores.values(), reverse=True)
-        margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) >= 2 else 1.0
-        confidence = best_score * 0.7 + margin * 0.3
-        confidence = max(0.0, min(1.0, confidence))
-        if best_score < 0.3:
-            confidence = 0.0
-        return HeaderDetectionResult(
-            header_row=best_row,
-            table_start=table_start,
-            confidence=confidence,
-            strategy=strategy,
-            diagnostics={'scores': candidates_scores, 'best_score': best_score}
-        )
+        score = (text_ratio * 10.0) + style_bonus + taxonomy_score + next_bonus + (row_info.non_empty_count * 0.2)
+        return float(score)
 
 # ============================================================
-# WORKBOOK READER
+# ORQUESTADOR PRINCIPAL
 # ============================================================
 
 class WorkbookReader:
@@ -438,15 +310,10 @@ class WorkbookReader:
     def close_workbook(workbook):
         workbook.close()
 
-# ============================================================
-# EXCEL IMPORTER (Orquestador principal)
-# ============================================================
-
 class ExcelImporter:
-    def __init__(self, max_scan_rows: int = 100, max_scan_cols: int = 30):
+    def __init__(self, max_scan_rows: int = 60, max_scan_cols: int = 50):
         self.max_scan_rows = max_scan_rows
         self.max_scan_cols = max_scan_cols
-        self.header_scorer = HeaderScorer()
 
     def import_from_bytes(self, data: bytes, filename: str) -> ImportResult:
         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
@@ -491,8 +358,8 @@ class ExcelImporter:
         return result
 
     def _process_sheet(self, worksheet, sheet_name: str, filepath: Path) -> SheetImportResult:
-        scanner = WorksheetScanner(worksheet, self.max_scan_rows, self.max_scan_cols)
-        rows_info = scanner.scan()
+        # 1. Escaneo seguro de las primeras filas
+        rows_info = WorksheetScanner.scan_head(worksheet, self.max_scan_rows, self.max_scan_cols)
         if not rows_info:
             return SheetImportResult(
                 sheet_name=sheet_name,
@@ -500,29 +367,76 @@ class ExcelImporter:
                 error="No se pudieron escanear filas (hoja vacía o demasiado pequeña)."
             )
 
+        # 2. Detectar región tabular (inicio de los datos)
         table_start = TableRegionDetector.detect_table_start(rows_info)
-        candidates = HeaderCandidateGenerator.generate_candidates(rows_info, table_start)
+        if table_start is None:
+            return SheetImportResult(
+                sheet_name=sheet_name,
+                success=False,
+                error="No se pudo detectar una región tabular válida."
+            )
 
+        # 3. Generar candidatos a encabezado (alrededor del inicio de la tabla)
+        candidates = self._generate_candidates(rows_info, table_start)
+
+        # 4. Puntuar cada candidato
+        scorer = HeaderScorer()
         scores = {}
         for row_idx in candidates:
             if row_idx < len(rows_info):
-                row_info = rows_info[row_idx]
-                # Usar len(row_info.cells) como número de columnas para el estilo
-                num_cols = len(row_info.cells)
-                style_info = StyleAnalyzer.row_style_info(worksheet, row_idx + 1, num_cols)
-                score = self.header_scorer.score_candidate(row_info, style_info, rows_info)
+                score = scorer.score_candidate(rows_info[row_idx], rows_info)
                 scores[row_idx] = score
 
-        header_result = ConfidenceCalculator.calculate(scores, table_start, strategy="hybrid")
-        if header_result is None or header_result.confidence < 0.2:
+        if not scores:
+            return SheetImportResult(
+                sheet_name=sheet_name,
+                success=False,
+                error="No se generaron candidatos a encabezado."
+            )
+
+        # 5. Seleccionar el mejor candidato
+        best_row = max(scores, key=scores.get)
+        best_score = scores[best_row]
+        confidence = min(1.0, max(0.0, best_score / 30.0))  # normalización aproximada
+
+        # 6. Si la confianza es baja, intentar fallback por taxonomía
+        if confidence < 0.3:
+            # Buscar fila con mejor mapeo a taxonomía entre las primeras 10
+            fallback_candidates = list(range(min(10, len(rows_info))))
+            best_taxonomy_score = -1
+            best_taxonomy_row = 0
+            for row_idx in fallback_candidates:
+                if row_idx >= len(rows_info):
+                    continue
+                row_info = rows_info[row_idx]
+                headers = [cell.value for cell in row_info.cells if cell.value is not None and str(cell.value).strip()]
+                if headers:
+                    mapeo, conf = TaxonomyValidator().validate(headers)
+                    taxonomy_score = mapeo * 0.7 + conf * 0.3
+                    if taxonomy_score > best_taxonomy_score:
+                        best_taxonomy_score = taxonomy_score
+                        best_taxonomy_row = row_idx
+            if best_taxonomy_score > 0.5:
+                best_row = best_taxonomy_row
+                confidence = max(confidence, 0.4)
+
+        header_result = HeaderDetectionResult(
+            header_row=best_row,
+            table_start=table_start,
+            confidence=confidence,
+            strategy="hybrid",
+            diagnostics={'scores': scores, 'best_score': best_score}
+        )
+
+        if confidence < 0.2:
             return SheetImportResult(
                 sheet_name=sheet_name,
                 success=False,
                 error="No se pudo detectar la fila de encabezados con confianza suficiente.",
-                diagnostics={'header_result': header_result, 'scores': scores}
+                diagnostics={'header_result': header_result}
             )
 
-        # Leer con pandas
+        # 7. Leer la hoja con pandas a partir de la fila de encabezados detectada
         try:
             df = self._read_sheet_with_pandas(filepath, sheet_name, header_result)
         except Exception as e:
@@ -541,6 +455,18 @@ class ExcelImporter:
             diagnostics={'scores': scores}
         )
 
+    def _generate_candidates(self, rows_info: List[RowInfo], table_start: int) -> List[int]:
+        """Genera candidatos alrededor del inicio de la tabla."""
+        candidates = set()
+        for offset in range(-4, 5):
+            row = table_start + offset
+            if 0 <= row < len(rows_info):
+                candidates.add(row)
+        # Si no hay candidatos, usar las primeras 5 filas
+        if not candidates:
+            candidates.update(range(min(5, len(rows_info))))
+        return sorted(candidates)
+
     def _read_sheet_with_pandas(self, filepath: Path, sheet_name: str, header_result: HeaderDetectionResult) -> pd.DataFrame:
         header_row = header_result.header_row
         return pd.read_excel(
@@ -551,7 +477,7 @@ class ExcelImporter:
         )
 
 # ============================================================
-# FUNCIÓN DE ENTRADA PARA REEMPLAZAR EL IMPORTADOR ACTUAL
+# FUNCIÓN DE ENTRADA
 # ============================================================
 
 def import_excel(data: bytes, filename: str) -> ImportResult:
