@@ -243,10 +243,28 @@ class TaxonomyValidator:
         except ImportError:
             self.mapper = None
 
-    def validate(self, headers: List[str]) -> Tuple[float, float]:
+    def validate(self, headers: List[Any]) -> Tuple[float, float]:
+        """
+        Convierte todos los headers a string de forma segura antes de validar.
+        Esto evita errores de 'float' object has no attribute 'strip'.
+        """
         if not headers or self.mapper is None:
             return 0.0, 0.0
-        dummy = pd.DataFrame([headers], columns=headers)
+        
+        # 🔥 SOLUCIÓN: Convertir todo a string y limpiar
+        clean_headers = []
+        for h in headers:
+            if h is None:
+                continue
+            # Forzar conversión a string y limpiar
+            h_str = str(h).strip()
+            if h_str:  # Solo si no está vacío
+                clean_headers.append(h_str)
+        
+        if len(clean_headers) < 2:  # Necesitamos al menos 2 columnas para validar
+            return 0.0, 0.0
+        
+        dummy = pd.DataFrame([clean_headers], columns=clean_headers)
         mapping = self.mapper.map_columns(dummy)
         mapped = 0
         total_conf = 0.0
@@ -276,7 +294,13 @@ class HeaderScorer:
         # 3. Taxonomía (si la fila tiene al menos 3 celdas no vacías)
         taxonomy_score = 0.0
         if row_info.non_empty_count >= 3:
-            headers = [cell.value for cell in row_info.cells if cell.value is not None and str(cell.value).strip()]
+            # 🔥 SOLUCIÓN: Convertir todo a string de forma segura
+            headers = []
+            for cell in row_info.cells:
+                if cell.value is not None:
+                    val_str = str(cell.value).strip()
+                    if val_str:
+                        headers.append(val_str)
             if headers:
                 mapeo, conf = self.taxonomy_validator.validate(headers)
                 taxonomy_score = (mapeo * 0.7 + conf * 0.3) * 5.0  # peso extra
@@ -409,7 +433,12 @@ class ExcelImporter:
                 if row_idx >= len(rows_info):
                     continue
                 row_info = rows_info[row_idx]
-                headers = [cell.value for cell in row_info.cells if cell.value is not None and str(cell.value).strip()]
+                headers = []
+                for cell in row_info.cells:
+                    if cell.value is not None:
+                        val_str = str(cell.value).strip()
+                        if val_str:
+                            headers.append(val_str)
                 if headers:
                     mapeo, conf = TaxonomyValidator().validate(headers)
                     taxonomy_score = mapeo * 0.7 + conf * 0.3
