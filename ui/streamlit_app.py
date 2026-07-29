@@ -5,9 +5,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 import pandas as pd
 import io
+import importlib.util
 
-# Importar el nuevo importador profesional
-from backend.pipelines.importers import import_excel
+# ============================================================
+# CARGA MANUAL DEL IMPORTADOR (para evitar problemas de cache)
+# ============================================================
+def load_import_excel():
+    """Carga la función import_excel desde backend/pipelines/importers.py"""
+    filepath = Path(__file__).resolve().parent.parent / "backend" / "pipelines" / "importers.py"
+    if not filepath.exists():
+        st.error(f"❌ No se encuentra el archivo: {filepath}")
+        return None
+    
+    spec = importlib.util.spec_from_file_location("importers_module", filepath)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    
+    if hasattr(module, "import_excel"):
+        return module.import_excel
+    else:
+        st.error("❌ La función 'import_excel' no se encontró en el módulo.")
+        return None
+
+# Cargar la función
+import_excel = load_import_excel()
+if import_excel is None:
+    st.stop()
+
+# Resto de imports normales
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.processor import PipelineProcessor
@@ -112,7 +137,6 @@ with col1:
                 with st.expander("📊 Productos Normalizados (Vista previa)", expanded=True):
                     if process_result['products']:
                         df_normalized = pd.DataFrame(process_result['products'])
-                        # Mostrar columnas relevantes
                         cols_to_show = ['codigo', 'nombre_articulo', 'precio_lista', 'hoja_origen'] if 'hoja_origen' in df_normalized.columns else ['codigo', 'nombre_articulo', 'precio_lista']
                         available_cols = [col for col in cols_to_show if col in df_normalized.columns]
                         st.dataframe(df_normalized[available_cols].head(20), use_container_width=True)
@@ -135,19 +159,15 @@ with col1:
                 # 6. Descarga en Excel y CSV
                 st.subheader("📥 Descargar Catálogo Normalizado")
                 
-                # Excel con múltiples hojas
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    # Hoja de datos normalizados
                     df_export = pd.DataFrame(process_result['products'])
                     df_export.to_excel(writer, sheet_name='Productos Normalizados', index=False)
                     
-                    # Hoja de validaciones
                     if issues:
                         issues_df = pd.DataFrame(issues)
                         issues_df.to_excel(writer, sheet_name='Validaciones', index=False)
                     
-                    # Hoja de mapeo
                     mapping_export = pd.DataFrame([
                         {"Columna Origen": col, "Campo Taxonomía": field if field else "No detectado", "Confianza": f"{conf*100:.0f}%"}
                         for col, (field, conf) in process_result['mapping'].items()
@@ -162,7 +182,6 @@ with col1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                # CSV simple
                 csv_data = pd.DataFrame(process_result['products']).to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="📥 Descargar CSV (solo datos)",
