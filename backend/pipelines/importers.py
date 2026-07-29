@@ -1,16 +1,16 @@
 """
 Módulo de Importadores - Adaptadores para leer datos desde diferentes fuentes.
-Soporte para Excel con encabezados en filas no estándar (detección automática).
+Detecta automáticamente la fila de encabezados usando heurística avanzada.
 """
 import pandas as pd
 import io
 import re
 from typing import Dict, List, Union, Optional
 from pathlib import Path
-from backend.domain.taxonomy import TAXONOMY  # para usar sinónimos en la detección
+from backend.domain.taxonomy import TAXONOMY
 
 class Importer:
-    """Importador que detecta automáticamente la fila de encabezados en cada hoja."""
+    """Importador con detección automática de encabezados."""
 
     @staticmethod
     def read(file_path: Union[str, Path]) -> pd.DataFrame:
@@ -43,36 +43,28 @@ class Importer:
 
     @staticmethod
     def _combine_sheets_with_auto_header(sheets_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """
-        Procesa cada hoja: detecta la fila de encabezados, limpia nombres,
-        extrae los datos y los concatena en un único DataFrame.
-        """
         all_dfs = []
         for sheet_name, df_raw in sheets_dict.items():
             if df_raw.empty:
                 continue
 
-            # 1. Detectar la fila de encabezados en esta hoja
+            # Detectar automáticamente la fila de encabezados
             header_row = Importer._detect_header_row(df_raw)
-            if header_row is None:
-                # Si no se detecta, usamos la primera fila (comportamiento por defecto)
-                header_row = 0
 
-            # 2. Extraer encabezados y datos
+            # Extraer encabezados y datos
             headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
             data_rows = df_raw.iloc[header_row + 1:].copy()
             data_rows.columns = headers
 
-            # 3. Limpiar nombres de columnas (espacios, símbolos, etc.)
+            # Limpiar nombres de columnas
             clean_headers = Importer._clean_column_names(headers)
             data_rows.columns = clean_headers
 
-            # 4. Eliminar filas completamente vacías
+            # Eliminar filas vacías
             data_rows = data_rows.dropna(how='all')
             if data_rows.empty:
                 continue
 
-            # 5. Añadir columna con el nombre de la hoja
             data_rows['hoja_origen'] = sheet_name
             all_dfs.append(data_rows)
 
@@ -82,73 +74,83 @@ class Importer:
         return pd.concat(all_dfs, ignore_index=True)
 
     @staticmethod
-    def _detect_header_row(df: pd.DataFrame) -> Optional[int]:
+    def _detect_header_row(df: pd.DataFrame) -> int:
         """
-        Detecta la fila que contiene los encabezados de columna.
-        Usa una heurística basada en:
-        - Porcentaje de celdas no vacías.
-        - Presencia de palabras clave de la taxonomía (sinónimos).
-        - Tipo de datos (prefiere texto sobre números).
+        Detecta la fila de encabezados usando una heurística avanzada.
+        Retorna el índice de la fila más probable.
         """
-        # Obtener todas las palabras clave (sinónimos) de la taxonomía
-        all_aliases = [alias.lower() for alias in TAXONOMY.get_all_aliases()]
-        # También agregamos algunos términos comunes que no están en la taxonomía
-        extra_keywords = ['código', 'descripción', 'precio', 'modelo', 'categoria', 'iva', 'ean']
-        keywords = set(all_aliases + extra_keywords)
-
         best_score = -1
         best_row = 0
-        # Revisar las primeras 30 filas (suficiente para la mayoría de los casos)
-        for row_idx in range(min(30, len(df))):
-            row_values = df.iloc[row_idx].astype(str).str.lower().str.strip()
+
+        # Palabras clave que suelen aparecer en encabezados
+        keywords = set([
+            'codigo', 'código', 'sku', 'modelo', 'descripcion', 'descripción',
+            'precio', 'precio_lista', 'pvp', 'iva', 'ean', 'marca', 'categoria',
+            'categoría', 'nombre', 'articulo', 'artículo', 'detalle', 'denominacion',
+            'cantidad', 'unidad', 'peso', 'alto', 'ancho', 'profundidad', 'color',
+            'talla', 'tamaño', 'stock', 'inventario', 'proveedor', 'fabricante'
+        ])
+
+        for row_idx in range(min(50, len(df))):
+            row_values = df.iloc[row_idx].astype(str).str.strip()
+            non_empty = [v for v in row_values if v and v not in ['nan', 'none', '']]
+            if len(non_empty) == 0:
+                continue
+
             # 1. Porcentaje de celdas no vacías
-            non_empty = sum(1 for v in row_values if v and v != 'nan' and v != 'none')
-            non_empty_ratio = non_empty / len(row_values) if len(row_values) > 0 else 0
+            non_empty_ratio = len(non_empty) / len(row_values)
 
-            # 2. Presencia de palabras clave
-            keyword_matches = 0
-            for val in row_values:
-                if val and val != 'nan':
-                    # Dividir por espacios o guiones
-                    tokens = re.split(r'[\s\-_/]+', val)
-                    for token in tokens:
-                        if token in keywords:
-                            keyword_matches += 1
-                            break  # una coincidencia por celda
+            # 2. Contar palabras clave y números
+            keyword_count = 0
+            numeric_count = 0
+            for val in non_empty:
+                val_lower = val.lower()
+                # Palabras clave
+                for kw in keywords:
+                    if kw in val_lower:
+                        keyword_count += 1
+                        break
+                # Números
+                if re.match(r'^[\d.,]+$', val_lower.replace(',', '').replace('.', '').strip()):
+                    numeric_count += 1
 
-            # 3. Penalizar si hay muchos números en la fila (probablemente datos, no encabezados)
-            numeric_count = sum(1 for v in row_values if re.match(r'^[\d.,]+$', v))
-            numeric_penalty = numeric_count / len(row_values) if len(row_values) > 0 else 0
+            keyword_ratio = keyword_count / len(non_empty) if len(non_empty) > 0 else 0
+            numeric_penalty = numeric_count / len(non_empty) if len(non_empty) > 0 else 0
+            text_ratio = 1 - numeric_penalty
 
-            # Puntuación combinada
-            score = (non_empty_ratio * 3) + (keyword_matches * 2) - (numeric_penalty * 2)
+            # Bonus por palabras muy relevantes
+            bonus = 0
+            for val in non_empty:
+                val_lower = val.lower()
+                if 'ean' in val_lower or 'código' in val_lower or 'codigo' in val_lower:
+                    bonus += 3
+                if 'precio' in val_lower or 'pvp' in val_lower:
+                    bonus += 2
 
-            # Bonus si la fila contiene exactamente 'ean' o 'código' (muy común)
-            if any('ean' in v or 'código' in v or 'codigo' in v for v in row_values):
-                score += 5
+            # Penalizar si los valores son muy largos (probable descripción)
+            avg_len = sum(len(v) for v in non_empty) / len(non_empty) if len(non_empty) > 0 else 0
+            length_penalty = 1 if avg_len > 50 else 0
+
+            # Puntuación final
+            score = (non_empty_ratio * 2) + (keyword_ratio * 5) + (text_ratio * 2) + bonus - (length_penalty * 2)
 
             if score > best_score:
                 best_score = score
                 best_row = row_idx
 
-        # Si la mejor puntuación es muy baja, es posible que no haya encabezados; usamos fila 0
+        # Si la mejor puntuación es muy baja, usar fila 0
         if best_score < 1.0:
             return 0
         return best_row
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
-        """Limpia los nombres de columnas: elimina espacios, convierte a minúsculas, reemplaza caracteres especiales."""
         cleaned = []
         for h in headers:
             h = str(h).strip()
-            # Eliminar caracteres extraños, pero mantener letras, números y algunos símbolos
             h = re.sub(r'[^a-zA-Z0-9áéíóúñüÁÉÍÓÚÑÜ\s]', '', h)
-            # Reemplazar espacios por guiones bajos
             h = h.replace(' ', '_').lower()
-            # Eliminar múltiples guiones bajos
             h = re.sub(r'_+', '_', h)
-            # Si queda vacío, poner "columna"
             if not h:
                 h = f"columna_{len(cleaned)}"
             cleaned.append(h)
