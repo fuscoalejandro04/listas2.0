@@ -1,6 +1,5 @@
 """
-Módulo de Importadores - Adaptadores para leer datos desde diferentes fuentes.
-Detección automática de encabezados mejorada: prioriza palabras clave fuertes.
+Módulo de Importadores - Versión final con detección robusta de encabezados.
 """
 import pandas as pd
 import io
@@ -11,7 +10,7 @@ from pathlib import Path
 from backend.domain.taxonomy import TAXONOMY
 
 class Importer:
-    """Importador con detección inteligente y automática de encabezados."""
+    """Importador con detección inteligente de encabezados, hoja por hoja."""
 
     @staticmethod
     def read(file_path: Union[str, Path]) -> pd.DataFrame:
@@ -49,19 +48,15 @@ class Importer:
             if df_raw.empty:
                 continue
 
-            # Detectar la fila de encabezados automáticamente
-            header_row, score = Importer._detect_header_row(df_raw)
-            # Si la detección falla (debería ser raro), usar fila 0
-            if header_row is None:
-                header_row = 0
-                score = 0
-
+            # Detectar la fila de encabezados para esta hoja
+            header_row = Importer._detect_header_row_sheet(df_raw)
+            
             # Extraer encabezados y datos
             headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
             data_rows = df_raw.iloc[header_row + 1:].copy()
             data_rows.columns = headers
 
-            # Limpiar nombres de columnas (sin tildes, espacios, etc.)
+            # Limpiar nombres de columnas
             clean_headers = Importer._clean_column_names(headers)
             data_rows.columns = clean_headers
 
@@ -69,6 +64,22 @@ class Importer:
             data_rows = data_rows.dropna(how='all')
             if data_rows.empty:
                 continue
+
+            # Verificar si los nombres son todos "Unnamed" - si es así, reintentar con fila 4
+            unnamed_ratio = sum(1 for h in clean_headers if h.startswith('columna_')) / len(clean_headers) if clean_headers else 1
+            if unnamed_ratio > 0.8:
+                # Reintentar con fila 4 (la que funciona en el archivo de ejemplo)
+                fallback_row = 4
+                if len(df_raw) > fallback_row:
+                    headers_fb = df_raw.iloc[fallback_row].astype(str).str.strip().tolist()
+                    data_rows = df_raw.iloc[fallback_row + 1:].copy()
+                    data_rows.columns = headers_fb
+                    clean_headers_fb = Importer._clean_column_names(headers_fb)
+                    data_rows.columns = clean_headers_fb
+                    data_rows = data_rows.dropna(how='all')
+                    if not data_rows.empty and all(h.startswith('columna_') for h in clean_headers_fb) == False:
+                        clean_headers = clean_headers_fb
+                        header_row = fallback_row
 
             data_rows['hoja_origen'] = sheet_name
             all_dfs.append(data_rows)
@@ -80,7 +91,6 @@ class Importer:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        """Elimina tildes y convierte a minúsculas para comparación."""
         if not isinstance(text, str):
             return ""
         text = text.lower()
@@ -88,86 +98,73 @@ class Importer:
         return "".join(c for c in nfkd if not unicodedata.combining(c))
 
     @staticmethod
-    def _detect_header_row(df: pd.DataFrame) -> tuple:
+    def _detect_header_row_sheet(df: pd.DataFrame) -> int:
         """
-        Detecta automáticamente la fila de encabezados.
-        Retorna (fila, puntuación) o (None, 0) si no se detecta.
+        Detecta la fila de encabezados en una hoja específica.
+        Estrategia: buscar la fila que contenga al menos una palabra clave fuerte
+        y tenga la mayor cantidad de celdas no vacías.
         """
-        # Palabras clave principales (muy distintivas)
-        strong_keywords = ['codigo', 'modelo', 'categoria', 'descripcion', 'precio', 'iva', 'ean', 'sku']
-        # Palabras adicionales (menos distintivas)
-        extra_keywords = ['foto', 'herramienta', 'sugerido', 'cuotas', 'costo', 'neto', 'marca']
+        strong_keywords = ['codigo', 'modelo', 'categoria', 'descripcion', 'precio', 'iva', 'ean', 'sku', 'código', 'descripción']
+        extra_keywords = ['foto', 'herramienta', 'sugerido', 'cuotas', 'costo', 'neto', 'marca', 'denominación']
         all_keywords = set(strong_keywords + extra_keywords)
 
-        best_row = 0
-        best_score = -1
-        best_non_empty = 0
-
-        # Revisar las primeras 30 filas (suficiente para la mayoría)
-        for row_idx in range(min(30, len(df))):
+        candidates = []
+        for row_idx in range(min(50, len(df))):
             row_values = df.iloc[row_idx].astype(str).str.strip().tolist()
-            valid_values = [v for v in row_values if v and v not in ['nan', 'None', '']]
-            if not valid_values:
+            valid = [v for v in row_values if v and v not in ['nan', 'None', '']]
+            if not valid:
                 continue
 
-            non_empty = len(valid_values)
-            # Contar cuántas celdas contienen al menos una palabra clave fuerte
-            strong_count = 0
-            keyword_count = 0
-            for val in valid_values:
+            non_empty = len(valid)
+            has_strong = False
+            keyword_score = 0
+            numeric_count = 0
+
+            for val in valid:
                 norm_val = Importer._normalize_text(val)
-                # Si contiene alguna strong_keyword, sumamos 2 puntos por celda
                 if any(kw in norm_val for kw in strong_keywords):
-                    strong_count += 1
-                    keyword_count += 2
+                    has_strong = True
+                    keyword_score += 3
                 elif any(kw in norm_val for kw in extra_keywords):
-                    keyword_count += 1
+                    keyword_score += 1
+                if re.match(r'^[\d.,]+$', norm_val.replace(',', '').replace('.', '')):
+                    numeric_count += 1
 
-            # Bonus si alguna celda contiene "ean"
-            if any('ean' in Importer._normalize_text(v) for v in valid_values):
-                keyword_count += 5
+            # Bonus especial por "ean"
+            if any('ean' in Importer._normalize_text(v) for v in valid):
+                keyword_score += 10
 
-            # La puntuación prioriza filas con strong_keywords y muchas celdas no vacías
-            score = keyword_count * 2 + non_empty
+            # Penalizar si hay muchos números
+            penalty = numeric_count / max(1, non_empty)
+            score = keyword_score * 2 + non_empty - penalty * 5
 
-            # Si la puntuación es mayor o si es igual y tiene más celdas no vacías, elegir esta fila
-            if score > best_score or (score == best_score and non_empty > best_non_empty):
-                best_score = score
+            if has_strong or keyword_score > 2:
+                candidates.append((row_idx, score, non_empty))
+
+        if candidates:
+            # Elegir el candidato con mayor puntuación, desempatar por non_empty
+            best = max(candidates, key=lambda x: (x[1], x[2]))
+            return best[0]
+
+        # Fallback: fila con más celdas no vacías
+        max_non_empty = 0
+        best_row = 0
+        for row_idx in range(min(30, len(df))):
+            non_empty = df.iloc[row_idx].count()
+            if non_empty > max_non_empty:
+                max_non_empty = non_empty
                 best_row = row_idx
-                best_non_empty = non_empty
-
-        # Si no se encontró ninguna fila con strong_keywords, buscar la fila con más celdas no vacías
-        if best_score == 0:
-            max_non_empty = 0
-            for row_idx in range(min(30, len(df))):
-                non_empty = df.iloc[row_idx].count()
-                if non_empty > max_non_empty:
-                    max_non_empty = non_empty
-                    best_row = row_idx
-            best_score = -1  # indicar que no se encontraron keywords
-
-        # Si la mejor fila tiene muy pocas celdas, usar la primera fila con al menos 3 celdas no vacías
-        if best_non_empty < 3 and best_score < 1:
-            for row_idx in range(min(30, len(df))):
-                if df.iloc[row_idx].count() >= 3:
-                    best_row = row_idx
-                    break
-
-        return best_row, best_score
+        return best_row
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
-        """Limpia nombres de columnas: sin tildes, espacios reemplazados por guiones bajos, minúsculas."""
         cleaned = []
         for h in headers:
             h = str(h).strip()
-            # Eliminar caracteres especiales, pero mantener letras y números
+            # Eliminar caracteres especiales, mantener letras y números
             h = re.sub(r'[^a-zA-Z0-9áéíóúñüÁÉÍÓÚÑÜ\s]', '', h)
-            # Reemplazar espacios por guiones bajos y convertir a minúsculas
             h = h.replace(' ', '_').lower()
-            # Eliminar tildes para uniformidad
             h = Importer._normalize_text(h)
-            # Eliminar múltiples guiones bajos
             h = re.sub(r'_+', '_', h)
             if not h:
                 h = f"columna_{len(cleaned)}"
