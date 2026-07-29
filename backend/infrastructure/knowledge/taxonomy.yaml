@@ -1,4 +1,4 @@
-# Taxonomía Estándar de Productos - AIPDP
+# Taxonomía Estándar de Productos - AIPDP (versión extendida)
 fields:
   - name: codigo
     data_type: string
@@ -10,7 +10,10 @@ fields:
       - "cod"
       - "item"
       - "referencia"
-      
+      - "código"
+      - "codigo"
+      - "code"
+
   - name: nombre_articulo
     data_type: string
     required: true
@@ -20,7 +23,9 @@ fields:
       - "denominación"
       - "producto"
       - "descripción corta"
-      
+      - "nombre articulo"
+      - "titulo"
+
   - name: descripcion
     data_type: string
     required: false
@@ -29,7 +34,10 @@ fields:
       - "detalle"
       - "descripción larga"
       - "observaciones"
-      
+      - "descripcion"
+      - "description"
+      - "descripción"
+
   - name: marca
     data_type: string
     required: false
@@ -37,7 +45,27 @@ fields:
     aliases:
       - "fabricante"
       - "brand"
-      
+      - "marca"
+
+  - name: modelo
+    data_type: string
+    required: false
+    description: "Modelo del producto"
+    aliases:
+      - "modelo"
+      - "model"
+
+  - name: categoria
+    data_type: string
+    required: false
+    description: "Categoría o familia del producto"
+    aliases:
+      - "categoría"
+      - "categoria"
+      - "family"
+      - "familia"
+      - "category"
+
   - name: precio_lista
     data_type: float
     required: true
@@ -48,7 +76,45 @@ fields:
       - "list price"
       - "p. lista"
       - "precio neto"
-      
+      - "precio de lista $ars"
+      - "precio de lista"
+      - "costo neto a ferreterias"
+      - "precio promocional"
+      - "precio lista"
+      - "list price"
+      - "precio neto"
+
+  - name: precio_sugerido
+    data_type: float
+    required: false
+    description: "Precio sugerido con IVA incluido"
+    aliases:
+      - "precio sugerido"
+      - "precio sugerido iva incluido"
+      - "precio con iva"
+      - "suggested price"
+      - "precio final"
+      - "precio venta"
+
+  - name: precio_2
+    data_type: float
+    required: false
+    description: "Precio en cuotas (ej. hasta 6 cuotas)"
+    aliases:
+      - "precio sugerido hasta 6 cuotas 13.8%"
+      - "precio 6 cuotas"
+      - "precio cuotas"
+      - "precio hasta 6 cuotas"
+
+  - name: precio_3
+    data_type: float
+    required: false
+    description: "Precio en más de 6 cuotas"
+    aliases:
+      - "precio sugerido más de 6 cuotas 35%"
+      - "precio +6 cuotas"
+      - "precio más cuotas"
+
   - name: iva
     data_type: float
     required: false
@@ -57,7 +123,10 @@ fields:
       - "iva %"
       - "impuesto"
       - "tax"
-      
+      - "% iva"
+      - "iva"
+      - "tasa iva"
+
   - name: ean
     data_type: string
     required: false
@@ -66,7 +135,9 @@ fields:
       - "ean13"
       - "código barras"
       - "upc"
-      
+      - "ean"
+      - "gtin"
+
   - name: moneda
     data_type: string
     required: false
@@ -74,3 +145,11 @@ fields:
     aliases:
       - "currency"
       - "$"
+      - "moneda"
+      - "divisa"
+
+  - name: hoja_origen
+    data_type: string
+    required: false
+    description: "Nombre de la hoja de origen (para archivos con múltiples hojas)"
+    aliases: []
