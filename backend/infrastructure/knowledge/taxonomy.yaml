@@ -1,0 +1,76 @@
+# Taxonomía Estándar de Productos - AIPDP
+fields:
+  - name: codigo
+    data_type: string
+    required: true
+    description: "Código interno o SKU del producto"
+    aliases:
+      - "artículo"
+      - "sku"
+      - "cod"
+      - "item"
+      - "referencia"
+      
+  - name: nombre_articulo
+    data_type: string
+    required: true
+    description: "Nombre corto o título del producto"
+    aliases:
+      - "nombre"
+      - "denominación"
+      - "producto"
+      - "descripción corta"
+      
+  - name: descripcion
+    data_type: string
+    required: false
+    description: "Descripción larga o detalle técnico"
+    aliases:
+      - "detalle"
+      - "descripción larga"
+      - "observaciones"
+      
+  - name: marca
+    data_type: string
+    required: false
+    description: "Marca o fabricante"
+    aliases:
+      - "fabricante"
+      - "brand"
+      
+  - name: precio_lista
+    data_type: float
+    required: true
+    description: "Precio de lista sin descuentos"
+    aliases:
+      - "precio"
+      - "pvp"
+      - "list price"
+      - "p. lista"
+      - "precio neto"
+      
+  - name: iva
+    data_type: float
+    required: false
+    description: "Tasa de IVA (ej. 21.0 para 21%)"
+    aliases:
+      - "iva %"
+      - "impuesto"
+      - "tax"
+      
+  - name: ean
+    data_type: string
+    required: false
+    description: "Código de barras EAN-13"
+    aliases:
+      - "ean13"
+      - "código barras"
+      - "upc"
+      
+  - name: moneda
+    data_type: string
+    required: false
+    description: "Moneda del precio (USD, EUR, ARS, etc.)"
+    aliases:
+      - "currency"
+      - "$"
