@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 from backend.domain.taxonomy import TAXONOMY
-from backend.domain.product import Product
+from backend.pipelines.importers import Importer
+from backend.pipelines.detectors import ColumnMapper
 
-# Configuración de la página (moderna y profesional)
 st.set_page_config(
     page_title="AIPDP - AI Product Data Platform",
     page_icon="🧠",
@@ -11,11 +11,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Título Principal
 st.title("🧠 AI Product Data Platform (AIPDP)")
 st.caption("Sistema central de conocimiento sobre productos - Fundación Cero")
 
-# Sidebar con información del sistema
+# Sidebar
 with st.sidebar:
     st.header("📊 Estado del Sistema")
     st.metric("Campos en Taxonomía", len(TAXONOMY.fields))
@@ -29,7 +28,7 @@ with st.sidebar:
         if field.aliases:
             st.caption(f"Alias: {', '.join(field.aliases[:3])}")
 
-# Área principal de trabajo
+# Área principal
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -41,25 +40,49 @@ with col1:
     )
     
     if uploaded_file is not None:
-        # Por ahora, solo mostramos la recepción. En Fase 2, llamaremos al pipeline.
-        st.success(f"Archivo recibido: **{uploaded_file.name}**")
-        st.info("⏳ El motor de procesamiento ETL se conectará aquí en la siguiente etapa.")
-        
-        # Previsualización básica (para ir calentando)
         try:
-            df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            st.dataframe(df.head(5))
+            # Leer el archivo usando nuestro importador
+            df = Importer.read_from_bytes(uploaded_file.read(), uploaded_file.name)
+            st.success(f"✅ Archivo leído: **{uploaded_file.name}** - {df.shape[0]} filas, {df.shape[1]} columnas")
+            
+            # Detectar columnas
+            mapper = ColumnMapper(confidence_threshold=0.6)
+            mapping = mapper.map_columns(df)
+            report = mapper.get_confidence_report(mapping)
+            
+            st.subheader("🔍 Mapeo de Columnas Detectado")
+            
+            # Mostrar tabla de mapeo
+            mapping_df = pd.DataFrame([
+                {
+                    "Columna Origen": col,
+                    "Campo Taxonomía": field if field else "❓ No detectado",
+                    "Confianza": f"{conf*100:.0f}%"
+                }
+                for col, (field, conf) in mapping.items()
+            ])
+            st.dataframe(mapping_df, use_container_width=True)
+            
+            # Métricas de confianza
+            col_met1, col_met2, col_met3 = st.columns(3)
+            col_met1.metric("Columnas Detectadas", report["mapped_columns"])
+            col_met2.metric("Columnas No Detectadas", report["unmapped_columns"])
+            col_met3.metric("Confianza Promedio", f"{report['average_confidence']*100:.0f}%")
+            
+            # Vista previa de datos
+            with st.expander("👁️ Vista previa de los datos"):
+                st.dataframe(df.head(10))
+            
         except Exception as e:
-            st.warning(f"No se pudo previsualizar: {e}")
+            st.error(f"❌ Error al procesar el archivo: {str(e)}")
 
 with col2:
     st.subheader("📈 Confianza del Sistema")
-    st.metric("Confianza Global", "N/A", delta="Esperando datos")
+    st.metric("Confianza Global", "N/A", delta="Sube un archivo para evaluar")
     st.metric("Productos en Memoria", "0")
     
     st.divider()
     st.caption("⚡ Arquitectura: Modular Monolith + Event Bus (In-Memory)")
 
-# Footer
 st.divider()
 st.caption("AIPDP v0.1.0 - Fundación | Desarrollado bajo Clean Architecture + DDD")
