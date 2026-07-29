@@ -1,60 +1,51 @@
-from typing import List, Optional
-from .models import RowInfo
-
 class TableRegionDetector:
-    """
-    Detecta la región tabular en una hoja a partir de los datos escaneados.
-    Busca una zona donde los tipos de datos sean homogéneos a lo largo de las columnas.
-    """
-
     @staticmethod
     def detect_table_start(rows_info: List[RowInfo]) -> Optional[int]:
-        """
-        Retorna el índice de la primera fila que pertenece a la tabla de datos.
-        Se basa en la consistencia de tipos de datos a lo largo de las columnas.
-        """
         if not rows_info or len(rows_info) < 2:
             return None
-
-        # Definir un umbral de homogeneidad: al menos un 70% de las columnas deben tener el mismo tipo
-        # entre filas consecutivas (dentro de una ventana de 5 filas).
+        
+        # Filtrar filas con max_col = 0 (vacías) para evitar errores
+        valid_rows = [r for r in rows_info if r.max_col > 0 and r.non_empty_count > 0]
+        if len(valid_rows) < 2:
+            return None
+        
         window_size = 5
         best_score = -1
-        best_start_row = None
-
-        for start_idx in range(len(rows_info) - window_size + 1):
-            window = rows_info[start_idx:start_idx + window_size]
-            # Para cada columna, calcular la moda de tipos dentro de la ventana
-            # y medir cuántas columnas son consistentes.
-            col_types = {}
-            for col in range(window[0].max_col):
+        best_start = None
+        
+        # Asegurar que no nos salimos del rango
+        for start_idx in range(max(0, len(valid_rows) - window_size + 1)):
+            window = valid_rows[start_idx:start_idx + window_size]
+            if len(window) < 2:
+                continue
+                
+            # Determinar el máximo de columnas en la ventana
+            max_cols_in_window = max(r.max_col for r in window)
+            if max_cols_in_window == 0:
+                continue
+                
+            col_ratios = {}
+            for col in range(max_cols_in_window):
                 types = []
                 for row in window:
                     if col < len(row.cells):
-                        cell_type = row.cells[col].cell_type
-                        if cell_type != CellType.EMPTY:
-                            types.append(cell_type)
+                        ct = row.cells[col].cell_type
+                        if ct != CellType.EMPTY:
+                            types.append(ct)
                 if types:
-                    # Moda (tipo más frecuente)
-                    from collections import Counter
                     counter = Counter(types)
                     most_common = counter.most_common(1)[0][0]
-                    # Proporción de celdas con ese tipo en la columna
                     ratio = counter[most_common] / len(types)
-                    col_types[col] = (most_common, ratio)
-
-            # Puntuación: promedio de ratios de consistencia
-            if col_types:
-                avg_ratio = sum(r for _, r in col_types.values()) / len(col_types)
-                # Penalizar si hay muchas columnas vacías
-                non_empty_cols = sum(1 for col, (_, r) in col_types.items() if r > 0.5)
+                    col_ratios[col] = (most_common, ratio)
+            
+            if col_ratios:
+                avg_ratio = sum(r for _, r in col_ratios.values()) / len(col_ratios)
+                non_empty_cols = sum(1 for col, (_, r) in col_ratios.items() if r > 0.5)
                 score = avg_ratio * (non_empty_cols / max(1, len(window[0].cells)))
                 if score > best_score:
                     best_score = score
-                    best_start_row = start_idx
-
-        # Si la mejor puntuación es baja, considerar que no hay región clara
+                    best_start = start_idx
+        
         if best_score < 0.3:
             return None
-
-        return best_start_row
+        return best_start
