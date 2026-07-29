@@ -1,16 +1,16 @@
 """
 Módulo Procesador - Orquesta todo el pipeline ETL.
+Ya no depende de importers, recibe el DataFrame directamente.
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple
 from backend.domain.taxonomy import TAXONOMY
-from backend.pipelines.importers import Importer
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
 
 class PipelineProcessor:
-    """Ejecuta el flujo completo de procesamiento."""
+    """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
     
     def __init__(self, confidence_threshold: float = 0.6):
         self.mapper = ColumnMapper(confidence_threshold)
