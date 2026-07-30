@@ -50,6 +50,146 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ============================================================
+# INTERFAZ CON PESTAÑAS (Tabs)
+# ============================================================
+tab1, tab2 = st.tabs(["⚡ Pipeline ETL", "⚙️ Configuración de Reglas"])
+
+# ============================================================
+# PESTAÑA 1: PIPELINE ETL (Todo el código actual)
+# ============================================================
+with tab1:
+    # --- Todo el código existente de importación y procesamiento va aquí ---
+    # (Coloca todo el contenido que estaba debajo de los imports,
+    #  desde el título y la sidebar hasta los botones de descarga)
+    # --- INICIO DEL BLOQUE EXISTENTE ---
+    
+    st.title("🧠 AI Product Data Platform (AIPDP)")
+    st.caption("Sistema central de conocimiento sobre productos - Pipeline ETL Activo con importación profesional")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("📊 Estado del Sistema")
+        st.metric("Campos en Taxonomía", len(TAXONOMY.fields))
+        st.metric("Sinónimos Registrados", len(TAXONOMY.get_all_aliases()))
+        
+        st.divider()
+        st.subheader("📋 Taxonomía Activa")
+        for field in TAXONOMY.fields[:5]:
+            required_tag = "🔴 Obligatorio" if field.required else "⚪ Opcional"
+            st.markdown(f"**{field.name}** (*{field.data_type}*) - {required_tag}")
+            if field.aliases:
+                st.caption(f"Alias: {', '.join(field.aliases[:3])}")
+    
+    # Área principal
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("🚀 Importar y Procesar Catálogo")
+        uploaded_file = st.file_uploader(
+            "Arrastra tu archivo (Excel, CSV) o selecciona",
+            type=['xlsx', 'xls', 'csv'],
+            accept_multiple_files=False
+        )
+        
+        if uploaded_file is not None:
+            with st.spinner("⏳ Procesando archivo... Esto puede tomar unos segundos."):
+                try:
+                    # ... (el resto del código de procesamiento) ...
+                    # Asegúrate de que todo el código desde "import_result = import_excel(...)"
+                    # hasta los botones de descarga esté aquí dentro.
+                    pass  # Reemplazar con el código real
+                except Exception as e:
+                    st.error(f"❌ Error durante el procesamiento: {str(e)}")
+                    st.exception(e)
+    
+    with col2:
+        st.subheader("📈 Confianza del Sistema")
+        st.metric("Confianza Global", "N/A", delta="Sube un archivo para evaluar")
+        st.metric("Productos en Memoria", "0")
+        
+        st.divider()
+        st.caption("⚡ Pipeline: Importación Profesional → Detectar → Normalizar → Validar")
+    
+    st.divider()
+    st.caption("AIPDP v0.5.0 - Importación profesional hoja por hoja")
+    
+    # --- FIN DEL BLOQUE EXISTENTE ---
+
+# ============================================================
+# PESTAÑA 2: CONFIGURACIÓN DE REGLAS (CRUD de Líneas de Producto)
+# ============================================================
+with tab2:
+    st.header("⚙️ Configuración de Reglas")
+    st.caption("Gestiona las líneas de producto que el sistema reconoce para categorización.")
+    
+    # Inicializar el categorizador (solo para acceder a las líneas)
+    from backend.pipelines.rule_categorizer import RuleCategorizer
+    categorizer = RuleCategorizer()
+    
+    # Mostrar lista actual
+    st.subheader("📋 Líneas de Producto Actuales")
+    lineas = categorizer.obtener_lineas()
+    
+    if lineas:
+        # Mostrar como tabla
+        df_lineas = pd.DataFrame({"Línea": lineas})
+        st.dataframe(df_lineas, use_container_width=True, hide_index=True)
+    else:
+        st.info("No hay líneas configuradas.")
+    
+    st.divider()
+    
+    # CRUD: Agregar nueva línea
+    st.subheader("➕ Agregar Nueva Línea")
+    col_add1, col_add2 = st.columns([3, 1])
+    with col_add1:
+        nueva_linea = st.text_input("Nombre de la línea (ej. PREMIUM PLUS)", key="nueva_linea_input")
+    with col_add2:
+        st.write("")  # Espaciado
+        st.write("")  # Espaciado
+        btn_agregar = st.button("Agregar Línea", type="primary", use_container_width=True)
+    
+    if btn_agregar:
+        if nueva_linea and nueva_linea.strip():
+            if categorizer.agregar_linea(nueva_linea.strip()):
+                st.success(f"✅ Línea '{nueva_linea.strip()}' agregada correctamente.")
+                st.rerun()  # Refrescar la página para mostrar la lista actualizada
+            else:
+                st.warning(f"⚠️ La línea '{nueva_linea.strip()}' ya existe o es inválida.")
+        else:
+            st.error("❌ Ingresa un nombre válido para la línea.")
+    
+    st.divider()
+    
+    # CRUD: Eliminar línea existente
+    st.subheader("🗑️ Eliminar Línea")
+    if lineas:
+        col_del1, col_del2 = st.columns([3, 1])
+        with col_del1:
+            linea_a_eliminar = st.selectbox(
+                "Selecciona una línea para eliminar",
+                options=lineas,
+                key="eliminar_linea_select"
+            )
+        with col_del2:
+            st.write("")  # Espaciado
+            st.write("")  # Espaciado
+            btn_eliminar = st.button("Eliminar Línea", type="secondary", use_container_width=True)
+        
+        if btn_eliminar:
+            if linea_a_eliminar:
+                if categorizer.eliminar_linea(linea_a_eliminar):
+                    st.success(f"✅ Línea '{linea_a_eliminar}' eliminada correctamente.")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Error al eliminar la línea '{linea_a_eliminar}'.")
+    else:
+        st.info("No hay líneas para eliminar.")
+    
+    st.divider()
+    st.caption("💡 Los cambios se guardan automáticamente en el archivo `backend/infrastructure/knowledge/lineas_producto.json`.")
+
 st.title("🧠 AI Product Data Platform (AIPDP)")
 st.caption("Sistema central de conocimiento sobre productos - Pipeline ETL Activo con importación profesional")
 
