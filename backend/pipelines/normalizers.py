@@ -47,31 +47,75 @@ class DataNormalizer:
         ]
 
     def normalize_row(self, row: pd.Series) -> Dict[str, Any]:
-        """
-        Recibe una fila (con columnas de la taxonomía) y devuelve un diccionario
-        con los valores normalizados.
-        """
-        normalized = {}
-        for field, normalizer_func in self.normalizers.items():
-            # Para 'unidad_medida', tomamos el valor de 'descripcion' si existe
-            if field == 'unidad_medida':
-                desc = row.get('descripcion', '')
-                normalized[field] = self._normalize_unit(desc)
-            else:
-                raw_value = row.get(field)
-                # Si el campo es un precio, puede devolver (valor, moneda)
-                if field.startswith('precio_'):
-                    result = normalizer_func(raw_value)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        normalized[field] = result[0]
-                        # Asignar moneda si no existe ya o es None
-                        if 'moneda' not in normalized or normalized['moneda'] is None:
-                            normalized['moneda'] = result[1]
-                    else:
-                        normalized[field] = result
+    """
+    Recibe una fila (con columnas de la taxonomía) y devuelve un diccionario
+    con los valores normalizados.
+    """
+    normalized = {}
+    
+    # --- Paso 1: Normalización estándar (igual que antes) ---
+    for field, normalizer_func in self.normalizers.items():
+        # Para 'unidad_medida', tomamos el valor de 'descripcion' si existe
+        if field == 'unidad_medida':
+            desc = row.get('descripcion', '')
+            normalized[field] = self._normalize_unit(desc)
+        else:
+            raw_value = row.get(field)
+            # Si el campo es un precio, puede devolver (valor, moneda)
+            if field.startswith('precio_'):
+                result = normalizer_func(raw_value)
+                if isinstance(result, tuple) and len(result) == 2:
+                    normalized[field] = result[0]
+                    # Asignar moneda si no existe ya o es None
+                    if 'moneda' not in normalized or normalized['moneda'] is None:
+                        normalized['moneda'] = result[1]
                 else:
-                    normalized[field] = normalizer_func(raw_value)
-        return normalized
+                    normalized[field] = result
+            else:
+                normalized[field] = normalizer_func(raw_value)
+
+    # ============================================================
+    # 🔥 PASO 2: SÍNTESIS DE ATRIBUTOS FALTANTES
+    # ============================================================
+    # Asegurar que todos los campos existen en el diccionario
+    normalized.setdefault('marca', None)
+    normalized.setdefault('modelo', None)
+    normalized.setdefault('descripcion', None)
+    normalized.setdefault('nombre_articulo', None)
+    normalized.setdefault('hoja_origen', None)
+
+    # 1. Inferir marca desde hoja_origen
+    marca = normalized.get('marca')
+    if not marca or marca.strip() == '':
+        hoja = normalized.get('hoja_origen', '')
+        if hoja:
+            hoja_upper = hoja.upper()
+            if 'EINHELL' in hoja_upper:
+                normalized['marca'] = 'EINHELL'
+            elif 'KWB' in hoja_upper:
+                normalized['marca'] = 'KWB'
+            # Si no coincide, se deja como estaba (None o vacío)
+
+    # 2. Sintetizar nombre_articulo si está vacío
+    nombre = normalized.get('nombre_articulo')
+    if not nombre or nombre.strip() == '':
+        marca_final = normalized.get('marca', '')
+        modelo = normalized.get('modelo', '')
+        desc = normalized.get('descripcion', '')
+
+        # 2a. Si hay marca y modelo, concatenarlos
+        if marca_final and modelo:
+            normalized['nombre_articulo'] = f"{marca_final} {modelo}".strip()
+        # 2b. Fallback: usar primeros 60 caracteres de descripcion
+        elif desc:
+            truncated = desc[:60]
+            if len(desc) > 60:
+                truncated += '...'
+            normalized['nombre_articulo'] = truncated
+        # 2c. Si no hay nada, dejar vacío (ya está None)
+
+    # ============================================================
+    return normalized
 
     # ---------- Funciones de normalización específicas ----------
     def _normalize_text(self, value: Any) -> Optional[str]:
