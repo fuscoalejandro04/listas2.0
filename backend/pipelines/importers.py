@@ -212,7 +212,7 @@ class Importer:
                     if not h_str:
                         h_str = f"columna_{len(cleaned)}"
                 cleaned.append(h_str)
-            except Exception as e:
+            except Exception:
                 # Si falla, asignar nombre genérico
                 cleaned.append(f"columna_{len(cleaned)}")
         return cleaned
@@ -234,3 +234,14 @@ class Importer:
             return "".join(c for c in nfkd if not unicodedata.combining(c))
         except Exception:
             return ""
+
+
+# ============================================================
+# 🆕 FUNCIÓN DE ENTRADA PARA LA UI (requerida por streamlit_app.py)
+# ============================================================
+def import_excel(data: bytes, filename: str) -> pd.DataFrame:
+    """
+    Función principal para importar archivos Excel desde bytes.
+    Retorna un DataFrame combinado de todas las hojas procesadas.
+    """
+    return Importer.read_from_bytes(data, filename)
