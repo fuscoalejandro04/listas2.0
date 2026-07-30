@@ -65,8 +65,12 @@ class PipelineProcessor:
         # 1.5 Normalización Estructural y Consolidación (Elimina tuplas duplicadas)
         df_clean = self.normalize_and_consolidate(df, mapping)
 
-        # 🔥 NUEVO: Limpieza de filas basura (títulos de sección, filas vacías)
-        # Eliminar filas donde 'codigo' y 'descripcion' sean nulos o vacíos
+        # ------------------------------------------------------------
+        # FILTROS DE LIMPIEZA DE FILAS BASURA
+        # ------------------------------------------------------------
+
+        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
+        #    (títulos de sección, filas completamente vacías)
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -74,6 +78,20 @@ class PipelineProcessor:
         elif 'codigo' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             df_clean = df_clean[~mask_codigo]
+
+        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
+        #    (subtítulos de familias como "PUNTAS Y PORTA PUNTAS", "MECHAS")
+        if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
+            mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
+            mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
+            df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
+
+        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
+        #    (encabezados repetidos que aparecen a mitad de hoja)
+        if 'codigo' in df_clean.columns:
+            codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
+            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
+            df_clean = df_clean[~mascara_encabezado]
 
         # 2. Normalización de Datos
         normalized_products = []
