@@ -11,22 +11,63 @@ from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
 from backend.pipelines.context_detector import ContextDetector, FileContext
-from backend.pipelines.ai_enricher import AIEnricher   # 🆕 nuevo módulo
+from backend.pipelines.rule_categorizer import RuleCategorizer
 
 
 class PipelineProcessor:
     """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
 
     def __init__(self, 
-                 confidence_threshold: float = 0.6,
-                 enable_ai: bool = True,
-                 ai_model: str = "gpt-4o-mini"):
+                 confidence_threshold: float = 0.8,
+                 enable_categorizer: bool = True):
         self.mapper = ColumnMapper(confidence_threshold)
-        self.normalizer = DataNormalizer()   # se crea sin contexto; se asignará en process()
+        self.normalizer = DataNormalizer()
         self.validator = Validator()
-        self.enable_ai = enable_ai
-        if self.enable_ai:
-            self.ai_enricher = AIEnricher(model=ai_model)  # 🔥 batch_size eliminado
+        self.enable_categorizer = enable_categorizer
+        if self.enable_categorizer:
+            self.categorizer = RuleCategorizer()
+
+    def _inferir_categorias_de_titulos(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        🔥 NUEVO: Detecta filas que son títulos de categoría (más del 80% de celdas vacías
+        pero con texto en las primeras columnas) y propaga la categoría hacia abajo
+        mediante forward fill. Crea la columna 'categoria_heredada' para que el
+        ColumnMapper la capture.
+        """
+        if df.empty:
+            return df
+        
+        # Crear columna vacía para la categoría heredada
+        df['categoria_heredada'] = None
+        
+        # Recorrer filas buscando títulos
+        total_cols = df.shape[1]
+        threshold = 0.8  # 80% de celdas vacías
+        
+        for idx in range(len(df)):
+            row = df.iloc[idx]
+            # Contar celdas no vacías (ignorando NaN y strings vacíos)
+            non_empty = row.count()
+            # Calcular porcentaje de vacíos
+            empty_ratio = 1 - (non_empty / total_cols)
+            
+            if empty_ratio >= threshold:
+                # Buscar texto en las primeras columnas (prioridad columna 0)
+                titulo = None
+                for col in range(min(3, total_cols)):  # Revisar primeras 3 columnas
+                    val = row.iloc[col]
+                    if pd.notna(val) and str(val).strip():
+                        titulo = str(val).strip()
+                        break
+                
+                if titulo:
+                    # Asignar título a la fila actual y luego hacer forward fill
+                    df.at[idx, 'categoria_heredada'] = titulo
+        
+        # Aplicar forward fill para propagar la categoría hacia las filas siguientes
+        df['categoria_heredada'] = df['categoria_heredada'].ffill()
+        
+        return df
 
     def normalize_and_consolidate(
         self, df: pd.DataFrame, mapping: Dict[str, Tuple[Optional[str], float]]
@@ -67,6 +108,9 @@ class PipelineProcessor:
         # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
+        # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (filas de encabezado)
+        df = self._inferir_categorias_de_titulos(df)
+
         # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
         context = FileContext()
         context.currency = ContextDetector.detect_currency(df)
@@ -78,6 +122,11 @@ class PipelineProcessor:
         # 1. Detección de columnas
         mapping = self.mapper.map_columns(df)
         confidence_report = self.mapper.get_confidence_report(mapping)
+
+        # 🔥 FORZAR QUE 'categoria_heredada' sea mapeada con confianza máxima
+        if 'categoria_heredada' in df.columns:
+            # Sobrescribir el mapeo para esta columna
+            mapping['categoria_heredada'] = ('categoria', 1.0)
 
         # 1.5 Normalización Estructural y Consolidación (Elimina tuplas duplicadas)
         df_clean = self.normalize_and_consolidate(df, mapping)
@@ -109,11 +158,11 @@ class PipelineProcessor:
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
 
-        # 🔥 2.5 ENRIQUECIMIENTO SEMÁNTICO CON IA (AHORA OPTIMIZADO)
-        if self.enable_ai and self.ai_enricher:
-            normalized_products = self.ai_enricher.enrich(normalized_products)
+        # 🔥 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
+        if self.enable_categorizer and self.categorizer:
+            normalized_products = self.categorizer.enrich(normalized_products)
 
-        # 3. Validación (ahora con campos enriquecidos)
+        # 3. Validación
         validation_report = self.validator.validate_all(normalized_products)
 
         # 4. Detectar duplicados (básico por código)
