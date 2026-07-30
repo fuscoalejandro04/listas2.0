@@ -2,7 +2,7 @@
 Módulo de Validación - Detecta errores, genera reporte de calidad y métricas de completitud.
 """
 from typing import List, Dict, Any, Optional
-
+import pandas as pd  # Para usar pd.isna
 
 class Validator:
     """Aplica reglas de calidad a los datos normalizados."""
@@ -12,7 +12,6 @@ class Validator:
     def __init__(self, quality_threshold: float = 0.8, max_price: float = 10_000_000):
         """
         Inicializa el validador con umbrales configurables.
-        
         Args:
             quality_threshold: Puntuación mínima (0-1) para considerar los datos válidos.
             max_price: Límite superior razonable para detectar outliers de precio.
@@ -25,7 +24,6 @@ class Validator:
         """Valida checksum EAN-13 (algoritmo estándar)."""
         if not ean or len(ean) != 13 or not ean.isdigit():
             return False
-        # Cálculo de checksum EAN-13
         total = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(ean[:12]))
         checksum = (10 - (total % 10)) % 10
         return checksum == int(ean[12])
@@ -38,6 +36,14 @@ class Validator:
         """Verifica que la moneda esté en la lista de soportadas."""
         return currency in self.SUPPORTED_CURRENCIES
 
+    def _safe_str(self, value: Any) -> str:
+        """Convierte a string vacío si es None, NaN o string vacío."""
+        if pd.isna(value):
+            return ''
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
     def validate_product(self, product: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Valida un producto y retorna una lista de issues.
@@ -46,31 +52,31 @@ class Validator:
         issues = []
 
         # --- Campos obligatorios ---
-        if not product.get('codigo', ''):
+        codigo = self._safe_str(product.get('codigo', ''))
+        if not codigo:
             issues.append({
                 'field': 'codigo',
                 'message': 'Código de producto vacío',
                 'severity': 'error'
             })
 
-        # 🔥 CALIBRACIÓN: nombre_articulo solo es warning si también faltan modelo y descripcion
-        nombre = product.get('nombre_articulo', '')
-        modelo = product.get('modelo', '')
-        descripcion = product.get('descripcion', '')
+        # 🔥 CORRECCIÓN: limpiar NaN y None antes de evaluar
+        nombre = self._safe_str(product.get('nombre_articulo', ''))
+        modelo = self._safe_str(product.get('modelo', ''))
+        descripcion = self._safe_str(product.get('descripcion', ''))
 
+        # Solo warning si los tres campos están vacíos
         if not nombre and not modelo and not descripcion:
             issues.append({
                 'field': 'nombre_articulo',
                 'message': 'Nombre del artículo, modelo y descripción vacíos',
                 'severity': 'warning'
             })
-        elif not nombre and (modelo or descripcion):
-            # Si falta nombre pero hay modelo o descripcion, no es warning (se puede inferir)
-            pass
+        # Si falta nombre pero hay modelo o descripción, no emitimos warning (es aceptable)
 
         # --- Precio ---
         price = product.get('precio_lista')
-        if price is None:
+        if price is None or pd.isna(price):
             issues.append({
                 'field': 'precio_lista',
                 'message': 'Precio ausente',
@@ -84,7 +90,7 @@ class Validator:
             })
 
         # --- EAN ---
-        ean = product.get('ean', '')
+        ean = self._safe_str(product.get('ean', ''))
         if ean and not self.validate_ean(ean):
             issues.append({
                 'field': 'ean',
@@ -93,11 +99,11 @@ class Validator:
             })
 
         # --- Moneda ---
-        currency = product.get('moneda')
-        if currency and not self.validate_currency(currency):
+        moneda = self._safe_str(product.get('moneda', ''))
+        if moneda and not self.validate_currency(moneda):
             issues.append({
                 'field': 'moneda',
-                'message': f'Moneda no soportada: {currency}',
+                'message': f'Moneda no soportada: {moneda}',
                 'severity': 'warning'
             })
 
@@ -140,21 +146,14 @@ class Validator:
 
     # ---------- Métodos auxiliares ----------
     def _calculate_quality_score(self, total: int, errors: int, warnings: int) -> float:
-        """
-        Calcula el score de calidad penalizando más los errores que los warnings.
-        - Cada error resta 2 puntos porcentuales.
-        - Cada warning resta 0.5 puntos porcentuales.
-        """
+        """Penaliza más los errores que los warnings."""
         if total == 0:
             return 0.0
         penalty = (errors * 2.0 + warnings * 0.5) / total
         return max(0.0, min(1.0, 1.0 - penalty))
 
     def _compute_completeness(self, products: List[Dict]) -> Dict[str, float]:
-        """
-        Calcula el porcentaje de completitud por campo.
-        Considera como vacíos: None, '', 'NaN', 'nan'.
-        """
+        """Calcula el porcentaje de completitud por campo."""
         if not products:
             return {}
         field_counts = {}
