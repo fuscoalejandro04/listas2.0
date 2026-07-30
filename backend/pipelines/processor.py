@@ -5,10 +5,12 @@ Integra la consolidación y normalización estructural de columnas.
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
+
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
+from backend.pipelines.context_detector import ContextDetector, FileContext
 
 
 class PipelineProcessor:
@@ -16,7 +18,7 @@ class PipelineProcessor:
 
     def __init__(self, confidence_threshold: float = 0.6):
         self.mapper = ColumnMapper(confidence_threshold)
-        self.normalizer = DataNormalizer()
+        self.normalizer = DataNormalizer()   # se crea sin contexto; se asignará en process()
         self.validator = Validator()
 
     def normalize_and_consolidate(
@@ -58,6 +60,14 @@ class PipelineProcessor:
         # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
+        # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
+        context = FileContext()
+        context.currency = ContextDetector.detect_currency(df)
+        context.default_unit = ContextDetector.detect_unit(df)
+        # Inyectar el contexto en el normalizador
+        self.normalizer.context = context
+        self.normalizer.default_unit = context.default_unit
+
         # 1. Detección de columnas
         mapping = self.mapper.map_columns(df)
         confidence_report = self.mapper.get_confidence_report(mapping)
@@ -70,7 +80,6 @@ class PipelineProcessor:
         # ------------------------------------------------------------
 
         # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
-        #    (títulos de sección, filas completamente vacías)
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -80,23 +89,20 @@ class PipelineProcessor:
             df_clean = df_clean[~mask_codigo]
 
         # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
-        #    (subtítulos de familias como "PUNTAS Y PORTA PUNTAS", "MECHAS")
         if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
             mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
             df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
 
         # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
-        #    (encabezados repetidos que aparecen a mitad de hoja)
         if 'codigo' in df_clean.columns:
             codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
             mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
             df_clean = df_clean[~mascara_encabezado]
 
-        # 2. Normalización de Datos
+        # 2. Normalización de Datos (ahora con contexto)
         normalized_products = []
         for _, row in df_clean.iterrows():
-            # 🔥 CORRECCIÓN CLAVE: NO pasar mapping, solo la fila
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
 
