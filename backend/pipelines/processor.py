@@ -1,7 +1,7 @@
 """
 Módulo Procesador - Orquesta todo el pipeline ETL.
 Ya no depende de importers, recibe el DataFrame directamente.
-Integra la consolidación, normalización estructural, enriquecimiento IA y validación.
+Integra la consolidación, normalización estructural, categorización por reglas y validación.
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
@@ -29,10 +29,10 @@ class PipelineProcessor:
 
     def _inferir_categorias_de_titulos(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        🔥 NUEVO: Detecta filas que son títulos de categoría (más del 80% de celdas vacías
-        pero con texto en las primeras columnas) y propaga la categoría hacia abajo
-        mediante forward fill. Crea la columna 'categoria_heredada' para que el
-        ColumnMapper la capture.
+        🔥 MODIFICADO: Detecta filas que son títulos de categoría (más del 80% de celdas vacías
+        pero con texto en las primeras columnas), propaga la categoría hacia abajo
+        mediante forward fill, y luego ELIMINA las filas de título para que no sean
+        procesadas como productos.
         """
         if df.empty:
             return df
@@ -40,32 +40,35 @@ class PipelineProcessor:
         # Crear columna vacía para la categoría heredada
         df['categoria_heredada'] = None
         
-        # Recorrer filas buscando títulos
+        # Identificar índices de filas que son títulos
+        titulos_indices = []
         total_cols = df.shape[1]
         threshold = 0.8  # 80% de celdas vacías
         
         for idx in range(len(df)):
             row = df.iloc[idx]
-            # Contar celdas no vacías (ignorando NaN y strings vacíos)
             non_empty = row.count()
-            # Calcular porcentaje de vacíos
             empty_ratio = 1 - (non_empty / total_cols)
             
             if empty_ratio >= threshold:
-                # Buscar texto en las primeras columnas (prioridad columna 0)
+                # Buscar texto en las primeras columnas
                 titulo = None
-                for col in range(min(3, total_cols)):  # Revisar primeras 3 columnas
+                for col in range(min(3, total_cols)):
                     val = row.iloc[col]
                     if pd.notna(val) and str(val).strip():
                         titulo = str(val).strip()
                         break
                 
                 if titulo:
-                    # Asignar título a la fila actual y luego hacer forward fill
                     df.at[idx, 'categoria_heredada'] = titulo
+                    titulos_indices.append(idx)
         
         # Aplicar forward fill para propagar la categoría hacia las filas siguientes
         df['categoria_heredada'] = df['categoria_heredada'].ffill()
+        
+        # 🔥 ELIMINAR LAS FILAS DE TÍTULO (para que no sean procesadas como productos)
+        if titulos_indices:
+            df = df.drop(index=titulos_indices).reset_index(drop=True)
         
         return df
 
@@ -108,7 +111,7 @@ class PipelineProcessor:
         # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
-        # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (filas de encabezado)
+        # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (Y ELIMINAR FILAS DE TÍTULO)
         df = self._inferir_categorias_de_titulos(df)
 
         # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
@@ -134,6 +137,8 @@ class PipelineProcessor:
         # ------------------------------------------------------------
         # FILTROS DE LIMPIEZA DE FILAS BASURA
         # ------------------------------------------------------------
+
+        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -142,11 +147,13 @@ class PipelineProcessor:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             df_clean = df_clean[~mask_codigo]
 
+        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
         if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
             mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
             df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
 
+        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
         if 'codigo' in df_clean.columns:
             codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
             mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
