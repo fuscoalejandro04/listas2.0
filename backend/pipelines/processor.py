@@ -60,7 +60,7 @@ class PipelineProcessor:
         # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
-        # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
+        # 🔥 Detectar contexto global (moneda y unidad por defecto)
         context = FileContext()
         context.currency = ContextDetector.detect_currency(df)
         context.default_unit = ContextDetector.detect_unit(df)
@@ -76,10 +76,8 @@ class PipelineProcessor:
         df_clean = self.normalize_and_consolidate(df, mapping)
 
         # ------------------------------------------------------------
-        # FILTROS DE LIMPIEZA DE FILAS BASURA
+        # FILTROS DE LIMPIEZA DE FILAS BASURA (sin cambios)
         # ------------------------------------------------------------
-
-        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -88,13 +86,11 @@ class PipelineProcessor:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             df_clean = df_clean[~mask_codigo]
 
-        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
         if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
             mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
             df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
 
-        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
         if 'codigo' in df_clean.columns:
             codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
             mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
