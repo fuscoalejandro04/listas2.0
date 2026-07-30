@@ -265,45 +265,38 @@ class DataNormalizer:
                 return cleaned.upper()
         return self.context.currency
 
+    # 🔥 CORRECCIÓN: Método _normalize_unit con filtro estricto de empaque comercial
     def _normalize_unit(self, value: Any) -> Optional[str]:
         """
-        Extrae unidad de medida de la descripción o nombre del producto.
-        Si no se encuentra, usa la unidad por defecto del contexto.
+        🔥 CORREGIDO: Extrae UNIDAD DE VENTA COMERCIAL (empaque) usando límites de palabra estricta.
+        Solo detecta palabras como 'caja', 'rollo', 'pack', 'kit', etc.
+        Si no encuentra un empaque comercial, retorna 'un' (Unidad) por defecto.
         """
+        default_comercial = "un"
         if pd.isna(value) or not isinstance(value, str):
-            return self.default_unit
+            return default_comercial
 
-        text = value.lower()
-
+        text = value.lower().strip()
+        
+        # 🔥 Diccionario de unidades de empaque comercial con patrones de límite de palabra (\b)
         unit_map = {
-            'kg': 'kg', 'kilogramo': 'kg', 'kilogramos': 'kg',
-            'g': 'g', 'gramo': 'g', 'gramos': 'g',
-            'mg': 'mg', 'miligramo': 'mg', 'miligramos': 'mg',
-            'm': 'm', 'metro': 'm', 'metros': 'm',
-            'cm': 'cm', 'centímetro': 'cm', 'centímetros': 'cm',
-            'mm': 'mm', 'milímetro': 'mm', 'milímetros': 'mm',
-            'un': 'un', 'unidad': 'un', 'unidades': 'un',
-            'paquete': 'paquete', 'paquetes': 'paquete',
-            'caja': 'caja', 'cajas': 'caja',
-            'rollo': 'rollo', 'rollos': 'rollo',
-            'l': 'l', 'litro': 'l', 'litros': 'l',
-            'tonelada': 'tn', 'toneladas': 'tn', 'tn': 'tn',
+            'caja': r'\bcaja\b|\bcajas\b',
+            'rollo': r'\brollo\b|\brollos\b',
+            'pack': r'\bpack\b|\bpacks\b',
+            'paquete': r'\bpaquete\b|\bpaquetes\b',
+            'kit': r'\bkit\b|\bkits\b',
+            'par': r'\bpar\b|\bpares\b',
+            'juego': r'\bjuego\b|\bjuegos\b',
+            'set': r'\bset\b|\bsets\b',
+            'litro': r'\blitro\b|\blitros\b',
+            'l': r'\bl\b',
+            'galon': r'\bgalon\b|\bgalones\b',
+            'docena': r'\bdocena\b|\bdocenas\b',
+            'bolsa': r'\bbolsa\b|\bbolsas\b'
         }
 
-        # Patrón: "x <número> <unidad>" (ej. "x 100 m" o "caja x 50 un")
-        match = re.search(r'x\s*(\d+\.?\d*)\s*([a-záéíóú]+)', text)
-        if match:
-            unit_candidate = match.group(2)
-            for key, unit in unit_map.items():
-                if key in unit_candidate:
-                    return unit
+        for unit, pattern in unit_map.items():
+            if re.search(pattern, text):
+                return unit
 
-        # Patrón: "<número> <unidad>" (ej. "100 m", "50 kg")
-        match = re.search(r'(\d+\.?\d*)\s*([a-záéíóú]+)', text)
-        if match:
-            unit_candidate = match.group(2)
-            for key, unit in unit_map.items():
-                if key in unit_candidate:
-                    return unit
-
-        return self.default_unit
+        return default_comercial
