@@ -6,7 +6,6 @@ import pandas as pd
 import re
 from typing import Dict, Any, Optional, Callable, Tuple
 
-# Importar el contexto (se inyectará desde el procesador)
 from backend.pipelines.context_detector import FileContext
 
 
@@ -28,22 +27,22 @@ class DataNormalizer:
             'categoria': self._normalize_text,
             'marca': self._normalize_text,
             'modelo': self._normalize_text,
-            'ean': self._normalize_ean,          # <-- Corregido el bug del "cero fantasma"
+            'ean': self._normalize_ean,
             'precio_lista': self._normalize_price_with_currency,
             'precio_sugerido': self._normalize_price_with_currency,
             'precio_2': self._normalize_price_with_currency,
             'precio_3': self._normalize_price_with_currency,
             'iva': self._normalize_iva,
-            'moneda': self._normalize_moneda,    # <-- NUEVA: función específica para moneda
-            'unidad_medida': self._normalize_unit,  # <-- NUEVO: extrae unidad de medida
+            'moneda': self._normalize_moneda,
+            'unidad_medida': self._normalize_unit,      # <-- extrae desde descripción
             'hoja_origen': self._normalize_text,
         }
 
         # Patrones de moneda para extracción
         self.currency_patterns = [
-            (r'^\s*U?\$?\s*', 'USD'),   # U$S, US$, $, etc.
-            (r'^\s*ARS\s*', 'ARS'),
-            (r'^\s*EUR\s*', 'EUR'),
+            (r'\s*U?\$?\s*', 'USD'),   # U$S, US$, $, etc.
+            (r'\s*ARS\s*', 'ARS'),
+            (r'\s*EUR\s*', 'EUR'),
             (r'\s*U?\$?\s*$', 'USD'),   # al final
         ]
 
@@ -96,17 +95,14 @@ class DataNormalizer:
     def _normalize_ean(self, value: Any) -> Optional[str]:
         """
         EAN: solo dígitos, manejo seguro de floats para evitar el 'cero fantasma'.
-        Ej: 4006825613964.0 -> '4006825613964' (sin el punto ni el cero extra).
         """
         if pd.isna(value):
             return None
-
         if isinstance(value, float):
             if value.is_integer():
                 value = int(value)
             else:
                 value = int(value)
-
         cleaned = re.sub(r'[^0-9]', '', str(value))
         return cleaned if cleaned else None
 
