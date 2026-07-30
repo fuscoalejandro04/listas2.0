@@ -81,7 +81,6 @@ fields:
       - "costo neto a ferreterias"
       - "precio promocional"
       - "precio lista"
-      - "list price"
       - "precio neto"
 
   - name: precio_sugerido
@@ -147,6 +146,23 @@ fields:
       - "$"
       - "moneda"
       - "divisa"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 🆕 NUEVO CAMPO: UNIDAD DE MEDIDA (para normalización multi-rubro)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: unidad_medida
+    data_type: string
+    required: false
+    description: "Unidad de medida o empaque (kg, m, un, mg, caja, rollo, etc.)"
+    aliases:
+      - "unidad"
+      - "medida"
+      - "empaque"
+      - "unit"
+      - "unidad de medida"
+      - "u.m"
+      - "medida"
+      - "presentación"
 
   - name: hoja_origen
     data_type: string
