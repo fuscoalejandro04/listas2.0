@@ -38,7 +38,6 @@ fields:
       - "description"
       - "descripción"
 
-  # 🆕 NUEVO CAMPO: Dimensiones (separado de descripcion para evitar colisiones)
   - name: dimensiones
     data_type: string
     required: false
@@ -81,6 +80,22 @@ fields:
       - "family"
       - "familia"
       - "category"
+
+  # 🆕 LÍNEA DE PRODUCTO (calidad/gama) - inferida por IA o extraída de categoría
+  - name: linea_producto
+    data_type: string
+    required: false
+    description: "Línea, gama, nivel de calidad o serie comercial del producto (ej. Classic, Professional, Expert, Premium, Basic)"
+    aliases:
+      - "linea"
+      - "gama"
+      - "calidad"
+      - "nivel"
+      - "rango"
+      - "serie"
+      - "clase"
+      - "tipo"
+      - "categoría de calidad"
 
   - name: precio_lista
     data_type: float
