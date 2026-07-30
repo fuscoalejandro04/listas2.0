@@ -35,7 +35,10 @@ class ContextDetector:
         que parecen contener números con símbolos de moneda).
         """
         # 1. Revisar primeras 20 filas en busca de palabras clave
-        top_text = df.iloc[:20].astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
+        # 🔥 FIX: forzar conversión a str dentro del join para evitar TypeError
+        top_text = df.iloc[:20].astype(str).apply(
+            lambda x: ' '.join(str(v) for v in x), axis=1
+        ).str.cat(sep=' ')
         top_text = top_text.lower()
 
         usd_patterns = ['usd', 'u$s', 'us$', 'dólar', 'dolar', 'dólares', 'dolares']
@@ -62,7 +65,7 @@ class ContextDetector:
             all_vals = []
             for col in price_cols:
                 all_vals.extend(df[col].dropna().astype(str).tolist())
-            all_text = ' '.join(all_vals).lower()
+            all_text = ' '.join(str(v) for v in all_vals).lower()
             if re.search(r'u?\$?\s?us\s?\$?|u\$s|us\$|dólar|dolar', all_text):
                 return 'USD'
             if re.search(r'ars|pesos', all_text):
@@ -89,7 +92,12 @@ class ContextDetector:
         if not desc_cols:
             return None
 
-        all_desc = ' '.join(df[desc_cols].dropna().astype(str).apply(lambda x: ' '.join(x), axis=1).tolist()).lower()
+        # 🔥 FIX: forzar conversión a str dentro del join
+        all_desc = ' '.join(
+            str(v) for v in df[desc_cols].dropna().astype(str).apply(
+                lambda x: ' '.join(str(v) for v in x), axis=1
+            ).tolist()
+        ).lower()
 
         unit_patterns = {
             'kg': r'\bkg\b',
