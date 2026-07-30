@@ -81,7 +81,6 @@ fields:
       - "familia"
       - "category"
 
-  # 🆕 LÍNEA DE PRODUCTO (calidad/gama) - inferida por IA o extraída de categoría
   - name: linea_producto
     data_type: string
     required: false
@@ -190,6 +189,43 @@ fields:
       - "unidad de medida"
       - "u.m"
       - "medida"
+      - "presentación"
+
+  # 🆕 NUEVOS CAMPOS PARA CATÁLOGOS CPSA Y SIMILARES
+  - name: unidad_precio
+    data_type: string
+    required: false
+    description: "Base de cotización del precio (ej. 100, 1000, BOLSA, GRANEL, etc.)"
+    aliases:
+      - "unidad de precio"
+      - "un. precio"
+      - "base"
+      - "por cantidad"
+      - "unidad precio"
+      - "precio por"
+
+  - name: cantidad_por_caja
+    data_type: integer
+    required: false
+    description: "Cantidad de unidades que contiene un bulto/caja/embalaje"
+    aliases:
+      - "cantidad por caja"
+      - "cant. caja"
+      - "unid/caja"
+      - "unidades por bulto"
+      - "bulto"
+      - "cant x caja"
+      - "unidades x caja"
+
+  - name: embalaje
+    data_type: string
+    required: false
+    description: "Tipo de embalaje o envase (ej. caja, bolsa, blister, etc.)"
+    aliases:
+      - "embalaje"
+      - "envase"
+      - "formato"
+      - "tipo embalaje"
       - "presentación"
 
   - name: hoja_origen
