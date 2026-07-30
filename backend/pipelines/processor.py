@@ -1,49 +1,31 @@
 """
 Módulo Procesador - Orquesta todo el pipeline ETL.
-Recibe el DataFrame ya importado, detecta columnas, consolida, normaliza y valida.
+Ya no depende de importers, recibe el DataFrame directamente.
+Integra la consolidación y normalización estructural de columnas.
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
-
+from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
 
 
 class PipelineProcessor:
-    """
-    Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado.
-    """
+    """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
 
-    def __init__(self, confidence_threshold: float = 0.6, quality_threshold: float = 0.8):
-        """
-        Inicializa el procesador con umbrales configurables.
-
-        Args:
-            confidence_threshold: Confianza mínima para considerar un mapeo válido.
-            quality_threshold: Puntuación de calidad mínima (0-1) para considerar los datos válidos.
-        """
+    def __init__(self, confidence_threshold: float = 0.6):
         self.mapper = ColumnMapper(confidence_threshold)
         self.normalizer = DataNormalizer()
-        self.validator = Validator(quality_threshold=quality_threshold)
+        self.validator = Validator()
 
     def normalize_and_consolidate(
-        self, 
-        df: pd.DataFrame, 
-        mapping: Dict[str, Tuple[Optional[str], float]]
+        self, df: pd.DataFrame, mapping: Dict[str, Tuple[Optional[str], float]]
     ) -> pd.DataFrame:
         """
         Renombra columnas según taxonomía, filtra las no mapeadas y consolida duplicados
         dando prioridad a la columna original con mayor índice de confianza.
-
-        Args:
-            df: DataFrame crudo.
-            mapping: Diccionario {columna_original: (campo_taxonomia, confianza)}.
-
-        Returns:
-            DataFrame con columnas estandarizadas y consolidadas (sin duplicados).
         """
-        # 1. Agrupar columnas por campo taxonómico
         groups = {}
         for orig_col, (field, conf) in mapping.items():
             if orig_col not in df.columns:
@@ -52,20 +34,19 @@ class PipelineProcessor:
                 continue
             groups.setdefault(field, []).append((conf, orig_col))
 
-        # 2. Crear nuevo DataFrame con columnas estandarizadas y consolidación (coalesce)
         df_result = pd.DataFrame(index=df.index)
 
         for field, cols_with_conf in groups.items():
-            # Ordenar por confianza (mayor primero) para dar prioridad
-            cols_sorted = [col for _, col in sorted(cols_with_conf, key=lambda x: x[0], reverse=True)]
+            # Ordenar por confianza descendente para priorizar la mejor columna
+            cols_sorted = [
+                col for _, col in sorted(cols_with_conf, key=lambda x: x[0], reverse=True)
+            ]
 
             if len(cols_sorted) == 1:
-                # Si solo hay una columna, asignar directamente
                 df_result[field] = df[cols_sorted[0]]
             else:
-                # Coalesce: combinar columnas con bfill(axis=1)
+                # Coalesce: bfill a lo largo de las columnas, luego tomar la primera
                 combined = pd.concat([df[col] for col in cols_sorted], axis=1)
-                # bfill hacia la izquierda: el primer valor no nulo se propaga a la columna 0
                 df_result[field] = combined.bfill(axis=1).iloc[:, 0]
 
         return df_result
@@ -73,47 +54,39 @@ class PipelineProcessor:
     def process(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
         Ejecuta todo el pipeline y retorna un resultado estructurado.
-
-        Args:
-            df: DataFrame crudo proveniente del importador.
-
-        Returns:
-            Diccionario con:
-                - mapping: Mapeo de columnas originales a taxonomía.
-                - confidence_report: Resumen de confianza por campo.
-                - products: Lista de productos normalizados.
-                - validation_report: Reporte de validación con issues y calidad.
-                - duplicates: Lista de productos duplicados por código.
-                - summary: Resumen ejecutivo.
         """
-        # 0. Asegurar que los nombres de columnas sean string (previene AttributeError)
+        # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
-        # 1. Detección de columnas (mapeo a taxonomía)
+        # 1. Detección de columnas
         mapping = self.mapper.map_columns(df)
         confidence_report = self.mapper.get_confidence_report(mapping)
 
-        # 2. Normalización estructural: renombrar y consolidar columnas
+        # 1.5 Normalización Estructural y Consolidación (Elimina tuplas duplicadas)
         df_clean = self.normalize_and_consolidate(df, mapping)
 
-        # 3. Normalización de datos (limpieza y tipificación)
+        # 🔥 NUEVO: Limpieza de filas basura (títulos de sección, filas vacías)
+        # Eliminar filas donde 'codigo' y 'descripcion' sean nulos o vacíos
+        if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
+            mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
+            mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
+            df_clean = df_clean[~(mask_codigo & mask_desc)]
+        elif 'codigo' in df_clean.columns:
+            mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
+            df_clean = df_clean[~mask_codigo]
+
+        # 2. Normalización de Datos
         normalized_products = []
         for _, row in df_clean.iterrows():
+            # 🔥 CORRECCIÓN CLAVE: NO pasar mapping, solo la fila
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
 
-        # 4. Validación de calidad
+        # 3. Validación
         validation_report = self.validator.validate_all(normalized_products)
 
-        # 5. Detección de duplicados por código
+        # 4. Detectar duplicados (básico por código)
         duplicates = self.find_duplicates(normalized_products)
-
-        # 6. Generar resumen ejecutivo
-        summary = self.generate_summary(
-            products=normalized_products,
-            validation=validation_report,
-            duplicates=duplicates
-        )
 
         return {
             'mapping': mapping,
@@ -121,17 +94,14 @@ class PipelineProcessor:
             'products': normalized_products,
             'validation_report': validation_report,
             'duplicates': duplicates,
-            'summary': summary,
+            'summary': self.generate_summary(
+                normalized_products, validation_report, duplicates
+            ),
         }
 
     @staticmethod
     def find_duplicates(products: List[Dict]) -> List[Dict]:
-        """
-        Detecta productos con mismo código (asumiendo que 'codigo' es único).
-
-        Returns:
-            Lista de duplicados con: {'row': idx, 'code': str, 'previous_row': int}
-        """
+        """Detecta productos con mismo código."""
         seen = {}
         duplicate_rows = []
         for idx, p in enumerate(products):
@@ -140,7 +110,7 @@ class PipelineProcessor:
                 continue
             if code in seen:
                 duplicate_rows.append({
-                    'row': idx + 1,          # 1-based para reporte
+                    'row': idx + 1,
                     'code': code,
                     'previous_row': seen[code]
                 })
@@ -150,20 +120,12 @@ class PipelineProcessor:
 
     @staticmethod
     def generate_summary(products: List[Dict], validation: Dict, duplicates: List) -> Dict:
-        """
-        Genera un resumen ejecutivo del procesamiento.
-        """
-        total = len(products)
-        error_count = validation.get('error_count', 0)
-        warning_count = validation.get('warning_count', 0)
-        valid_count = total - error_count  # Aproximación: productos sin errores
-
+        """Genera un resumen ejecutivo del procesamiento."""
         return {
-            'total_rows': total,
-            'valid_rows': valid_count,
-            'error_rows': error_count,
-            'warning_rows': warning_count,
+            'total_rows': len(products),
+            'valid_rows': validation['total_products'] - validation['error_count'],
+            'error_rows': validation['error_count'],
+            'warning_rows': validation['warning_count'],
             'duplicate_count': len(duplicates),
-            'quality_score': validation.get('quality_score', 0.0),
-            'is_valid': validation.get('is_valid', False),
+            'quality_score': validation['quality_score']
         }
