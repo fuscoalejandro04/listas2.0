@@ -1,10 +1,13 @@
 """
 Módulo de Normalización - Limpia y tipifica los datos crudos.
-Asume que las columnas ya tienen los nombres de la taxonomía (ej. 'precio_lista', 'ean').
+Ahora con detección de contexto (moneda y unidades) y extracción de unidades desde descripciones.
 """
 import pandas as pd
 import re
 from typing import Dict, Any, Optional, Callable, Tuple
+
+# Importar el contexto (se inyectará desde el procesador)
+from backend.pipelines.context_detector import FileContext
 
 
 class DataNormalizer:
@@ -13,7 +16,10 @@ class DataNormalizer:
     Cada campo se somete a una función de limpieza/conversión específica.
     """
 
-    def __init__(self):
+    def __init__(self, context: Optional[FileContext] = None):
+        self.context = context or FileContext()
+        self.default_unit = self.context.default_unit
+
         # Registro de funciones de normalización por campo
         self.normalizers: Dict[str, Callable[[Any], Any]] = {
             'codigo': self._normalize_codigo,
@@ -29,8 +35,10 @@ class DataNormalizer:
             'precio_3': self._normalize_price_with_currency,
             'iva': self._normalize_iva,
             'moneda': self._normalize_moneda,    # <-- NUEVA: función específica para moneda
+            'unidad_medida': self._normalize_unit,  # <-- NUEVO: extrae unidad de medida
             'hoja_origen': self._normalize_text,
         }
+
         # Patrones de moneda para extracción
         self.currency_patterns = [
             (r'^\s*U?\$?\s*', 'USD'),   # U$S, US$, $, etc.
@@ -46,19 +54,24 @@ class DataNormalizer:
         """
         normalized = {}
         for field, normalizer_func in self.normalizers.items():
-            raw_value = row.get(field)
-            # Si el campo es un precio, puede devolver (valor, moneda)
-            if field.startswith('precio_'):
-                result = normalizer_func(raw_value)
-                if isinstance(result, tuple) and len(result) == 2:
-                    normalized[field] = result[0]
-                    # Asignar moneda si no existe ya o es None
-                    if 'moneda' not in normalized or normalized['moneda'] is None:
-                        normalized['moneda'] = result[1]
-                else:
-                    normalized[field] = result
+            # Para 'unidad_medida', tomamos el valor de 'descripcion' si existe
+            if field == 'unidad_medida':
+                desc = row.get('descripcion', '')
+                normalized[field] = self._normalize_unit(desc)
             else:
-                normalized[field] = normalizer_func(raw_value)
+                raw_value = row.get(field)
+                # Si el campo es un precio, puede devolver (valor, moneda)
+                if field.startswith('precio_'):
+                    result = normalizer_func(raw_value)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        normalized[field] = result[0]
+                        # Asignar moneda si no existe ya o es None
+                        if 'moneda' not in normalized or normalized['moneda'] is None:
+                            normalized['moneda'] = result[1]
+                    else:
+                        normalized[field] = result
+                else:
+                    normalized[field] = normalizer_func(raw_value)
         return normalized
 
     # ---------- Funciones de normalización específicas ----------
@@ -75,7 +88,6 @@ class DataNormalizer:
         """Código: se espera string numérico o alfanumérico."""
         if pd.isna(value):
             return None
-        # Si es float con .0, convertir a entero y luego a string
         if isinstance(value, float):
             if value.is_integer():
                 return str(int(value))
@@ -89,16 +101,12 @@ class DataNormalizer:
         if pd.isna(value):
             return None
 
-        # --- CORRECCIÓN CLAVE: Manejar floats antes de convertir a string ---
         if isinstance(value, float):
-            # Si el float representa un entero (ej. 4006825613964.0)
             if value.is_integer():
                 value = int(value)
             else:
-                # Si tiene decimales (caso raro), truncamos para evitar errores
                 value = int(value)
 
-        # Ahora eliminamos todo lo que no sea dígito
         cleaned = re.sub(r'[^0-9]', '', str(value))
         return cleaned if cleaned else None
 
@@ -106,12 +114,13 @@ class DataNormalizer:
         """
         Normaliza el precio y extrae el símbolo de moneda.
         Retorna (valor_float, simbolo_moneda).
+        Si no se detecta moneda en la celda, usa la del contexto global.
         """
         if pd.isna(value):
-            return None, None
+            return None, self.context.currency
 
         if isinstance(value, (int, float)):
-            return float(value), None
+            return float(value), self.context.currency
 
         if isinstance(value, str):
             cleaned = value.strip()
@@ -137,18 +146,17 @@ class DataNormalizer:
             # 3. Remover todo lo que no sea dígito, punto o signo menos
             cleaned = re.sub(r'[^\d.-]', '', cleaned)
             try:
-                return float(cleaned), currency_symbol
+                return float(cleaned), currency_symbol or self.context.currency
             except ValueError:
-                return None, currency_symbol
+                return None, currency_symbol or self.context.currency
 
-        return None, None
+        return None, self.context.currency
 
     def _normalize_iva(self, value: Any) -> Optional[float]:
         """IVA: convierte a float, interpreta porcentajes."""
         if pd.isna(value):
             return None
         if isinstance(value, (int, float)):
-            # Si es 21.0, asumimos que es 21% (0.21)
             if value > 1:
                 return value / 100.0
             return float(value)
@@ -168,16 +176,56 @@ class DataNormalizer:
 
     def _normalize_moneda(self, value: Any) -> Optional[str]:
         """
-        🔥 NUEVA FUNCIÓN: Normaliza la moneda filtrando ruido.
-        Solo devuelve el valor si es una cadena corta (≤ 4 caracteres).
-        Esto evita que descripciones largas se confundan con moneda.
+        Normaliza la moneda filtrando ruido (solo acepta strings cortos ≤ 4 caracteres).
+        Si no se detecta, usa la moneda del contexto.
         """
         if pd.isna(value):
-            return None
+            return self.context.currency
         if isinstance(value, str):
             cleaned = value.strip()
-            # Si tiene más de 4 caracteres, es ruido (descripción larga)
-            if len(cleaned) > 4:
-                return None
-            return cleaned.upper() if cleaned else None
-        return None
+            if len(cleaned) <= 4:
+                return cleaned.upper()
+        return self.context.currency
+
+    def _normalize_unit(self, value: Any) -> Optional[str]:
+        """
+        Extrae unidad de medida de la descripción o nombre del producto.
+        Si no se encuentra, usa la unidad por defecto del contexto.
+        """
+        if pd.isna(value) or not isinstance(value, str):
+            return self.default_unit
+
+        text = value.lower()
+
+        unit_map = {
+            'kg': 'kg', 'kilogramo': 'kg', 'kilogramos': 'kg',
+            'g': 'g', 'gramo': 'g', 'gramos': 'g',
+            'mg': 'mg', 'miligramo': 'mg', 'miligramos': 'mg',
+            'm': 'm', 'metro': 'm', 'metros': 'm',
+            'cm': 'cm', 'centímetro': 'cm', 'centímetros': 'cm',
+            'mm': 'mm', 'milímetro': 'mm', 'milímetros': 'mm',
+            'un': 'un', 'unidad': 'un', 'unidades': 'un',
+            'paquete': 'paquete', 'paquetes': 'paquete',
+            'caja': 'caja', 'cajas': 'caja',
+            'rollo': 'rollo', 'rollos': 'rollo',
+            'l': 'l', 'litro': 'l', 'litros': 'l',
+            'tonelada': 'tn', 'toneladas': 'tn', 'tn': 'tn',
+        }
+
+        # Patrón: "x <número> <unidad>" (ej. "x 100 m" o "caja x 50 un")
+        match = re.search(r'x\s*(\d+\.?\d*)\s*([a-záéíóú]+)', text)
+        if match:
+            unit_candidate = match.group(2)
+            for key, unit in unit_map.items():
+                if key in unit_candidate:
+                    return unit
+
+        # Patrón: "<número> <unidad>" (ej. "100 m", "50 kg")
+        match = re.search(r'(\d+\.?\d*)\s*([a-záéíóú]+)', text)
+        if match:
+            unit_candidate = match.group(2)
+            for key, unit in unit_map.items():
+                if key in unit_candidate:
+                    return unit
+
+        return self.default_unit
