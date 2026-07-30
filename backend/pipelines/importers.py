@@ -6,11 +6,135 @@ import pandas as pd
 import io
 import re
 import numpy as np
-from typing import Dict, List, Union, Optional
+import unicodedata
+from typing import Dict, List, Union, Optional, Any, Tuple
 from pathlib import Path
+from dataclasses import dataclass, field
+from enum import Enum
 from backend.domain.taxonomy import TAXONOMY
 
 
+# ============================================================
+# MODELOS DE DOMINIO PARA EL IMPORTADOR
+# ============================================================
+class CellType(Enum):
+    EMPTY = "empty"
+    TEXT = "text"
+    NUMBER = "number"
+    DATE = "date"
+    BOOLEAN = "boolean"
+    FORMULA = "formula"
+    ERROR = "error"
+
+
+@dataclass
+class CellInfo:
+    row: int
+    col: int
+    value: Optional[str] = None
+    cell_type: CellType = CellType.EMPTY
+    is_merged: bool = False
+    bold: bool = False
+    fill_color: Optional[str] = None
+    border_bottom: bool = False
+
+
+@dataclass
+class RowInfo:
+    index: int
+    cells: List[CellInfo]
+    non_empty_count: int = 0
+    text_count: int = 0
+    number_count: int = 0
+    date_count: int = 0
+    empty_count: int = 0
+    max_col: int = 0
+
+
+@dataclass
+class HeaderDetectionResult:
+    header_row: Optional[int]
+    table_start: Optional[int]
+    confidence: float
+    strategy: str
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SheetImportResult:
+    sheet_name: str
+    success: bool
+    header_result: Optional[HeaderDetectionResult] = None
+    dataframe: Optional[pd.DataFrame] = None
+    error: Optional[str] = None
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ImportResult:
+    filename: str
+    successful_sheets: List[SheetImportResult] = field(default_factory=list)
+    failed_sheets: List[SheetImportResult] = field(default_factory=list)
+    total_sheets: int = 0
+    total_successful: int = 0
+    total_failed: int = 0
+
+
+# ============================================================
+# CLASIFICADOR DE TIPOS
+# ============================================================
+class TypeClassifier:
+    """Clasifica el tipo de dato de una celda."""
+    
+    NUMBER_PATTERNS = [
+        re.compile(r'^[+-]?\d{1,3}(?:\.\d{3})*(?:,\d+)?$'),
+        re.compile(r'^[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?$'),
+        re.compile(r'^[+-]?\d+(?:[.,]\d+)?$'),
+        re.compile(r'^\$?\d+(?:[.,]\d+)?$'),
+        re.compile(r'^\d+(?:[.,]\d+)?%$'),
+    ]
+    DATE_PATTERNS = [
+        re.compile(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$'),
+        re.compile(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2}$'),
+    ]
+    BOOLEAN_TRUE = re.compile(r'^(true|yes|sí|si|1)$', re.IGNORECASE)
+    BOOLEAN_FALSE = re.compile(r'^(false|no|0)$', re.IGNORECASE)
+    ERROR_PATTERNS = [re.compile(r'^#\w+!?$')]
+
+    @classmethod
+    def classify(cls, value) -> CellType:
+        if value is None or (isinstance(value, str) and value.strip() == ''):
+            return CellType.EMPTY
+        if isinstance(value, bool):
+            return CellType.BOOLEAN
+        if isinstance(value, (int, float)):
+            return CellType.NUMBER
+        if isinstance(value, pd.Timestamp) or isinstance(value, pd.Timestamp):
+            return CellType.DATE
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped == '':
+                return CellType.EMPTY
+            for pat in cls.ERROR_PATTERNS:
+                if pat.match(stripped):
+                    return CellType.ERROR
+            for pat in cls.DATE_PATTERNS:
+                if pat.match(stripped):
+                    return CellType.DATE
+            for pat in cls.NUMBER_PATTERNS:
+                if pat.match(stripped):
+                    return CellType.NUMBER
+            if cls.BOOLEAN_TRUE.match(stripped) or cls.BOOLEAN_FALSE.match(stripped):
+                return CellType.BOOLEAN
+            if stripped.startswith('='):
+                return CellType.FORMULA
+            return CellType.TEXT
+        return CellType.TEXT
+
+
+# ============================================================
+# IMPORTER PRINCIPAL
+# ============================================================
 class Importer:
     """Importador que detecta automaticamente la fila de encabezados en cada hoja."""
 
@@ -75,7 +199,7 @@ class Importer:
                 data_rows = df_raw.iloc[header_row + 1:].copy()
                 data_rows.columns = headers
 
-                # 3. Limpiar nombres de columnas (con protección extra)
+                # 3. Limpiar nombres de columnas
                 clean_headers = Importer._clean_column_names(headers)
                 data_rows.columns = clean_headers
 
@@ -86,7 +210,6 @@ class Importer:
 
                 # 🔥 INYECCIÓN DEL TÍTULO HUÉRFANO COMO PRIMERA FILA
                 if last_title:
-                    # Crear una fila con el título en la primera columna y NaN en el resto
                     new_row = {col: np.nan for col in data_rows.columns}
                     new_row[data_rows.columns[0]] = last_title
                     new_df = pd.DataFrame([new_row])
@@ -97,9 +220,7 @@ class Importer:
                 all_dfs.append(data_rows)
 
             except Exception as e:
-                # Registrar el error de esta hoja y continuar
                 print(f"⚠️ Error al procesar la hoja '{sheet_name}': {e}")
-                # Re-lanzar para que el importador lo capture y lo muestre en la UI
                 raise ValueError(f"Hoja '{sheet_name}': {str(e)}")
 
         if not all_dfs:
@@ -117,7 +238,6 @@ class Importer:
         best_score = -1
         best_row = 0
 
-        # Palabras clave que suelen aparecer en encabezados
         keywords = set([
             'codigo', 'código', 'sku', 'modelo', 'descripción', 'descripcion',
             'precio', 'precio_lista', 'pvp', 'iva', 'ean', 'marca', 'categoría', 'categoria',
@@ -128,27 +248,20 @@ class Importer:
 
         for row_idx in range(min(50, len(df))):
             try:
-                # 🔥 Convertir TODA la fila a string ANTES de cualquier operación
                 row_values = df.iloc[row_idx].astype(str).str.strip()
-                # Filtrar valores vacíos
                 non_empty = [v for v in row_values if v and v not in ['nan', 'none', '']]
                 if len(non_empty) == 0:
                     continue
 
-                # 1. Porcentaje de celdas no vacías
                 non_empty_ratio = len(non_empty) / len(row_values)
-
-                # 2. Contar palabras clave y números
                 keyword_count = 0
                 numeric_count = 0
                 for val in non_empty:
                     val_lower = val.lower()
-                    # Palabras clave
                     for k in keywords:
                         if k in val_lower:
                             keyword_count += 1
                             break
-                    # Números (removiendo puntos y comas)
                     if re.match(r'^[0-9]+$', val_lower.replace('.', '').replace(',', '').strip()):
                         numeric_count += 1
 
@@ -156,7 +269,6 @@ class Importer:
                 numeric_penalty = numeric_count / len(non_empty) if len(non_empty) > 0 else 0
                 text_ratio = 1 - numeric_penalty
 
-                # Bonus por palabras muy relevantes
                 bonus = 0
                 for val in non_empty:
                     val_lower = val.lower()
@@ -165,11 +277,9 @@ class Importer:
                     if 'precio' in val_lower or 'pvp' in val_lower:
                         bonus += 2
 
-                # Penalizar si los valores son muy largos (probable descripción)
                 avg_len = sum(len(v) for v in non_empty) / len(non_empty) if len(non_empty) > 0 else 0
                 length_penalty = 1 if avg_len > 50 else 0
 
-                # Puntuación final
                 score = (non_empty_ratio * 2) + (keyword_ratio * 5) + (text_ratio * 2) + bonus - (length_penalty * 2)
 
                 if score > best_score:
@@ -177,10 +287,8 @@ class Importer:
                     best_row = row_idx
 
             except Exception:
-                # Si falla el procesamiento de esta fila, la ignoramos
                 continue
 
-        # Si la mejor puntuación es muy baja, usar fila 0
         if best_score < 1.0:
             return 0
 
@@ -188,47 +296,33 @@ class Importer:
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
-        """
-        Limpia nombres de columnas: sin tildes, espacios reemplazados por guiones bajos, minúsculas.
-        🔥 Protegido: cada elemento se convierte a string antes de cualquier operación.
-        """
+        """Limpia nombres de columnas: sin tildes, espacios reemplazados por guiones bajos, minúsculas."""
         cleaned = []
         for h in headers:
             try:
-                # 🔥 Convertir a string ANTES de cualquier operación
                 h_str = str(h).strip() if h is not None else ""
                 if not h_str:
                     h_str = f"columna_{len(cleaned)}"
                 else:
-                    # Eliminar caracteres especiales, pero mantener letras y números
                     h_str = re.sub(r'[^a-zA-Z0-9áéíóúñü\s]', '', h_str)
                     h_str = h_str.replace(' ', '_').lower()
-                    # Eliminar tildes
                     h_str = Importer._normalize_text(h_str)
-                    # Eliminar múltiples guiones bajos
                     h_str = re.sub(r'_+', '_', h_str)
-                    # Limpiar guiones al inicio o final
                     h_str = h_str.strip('_')
                     if not h_str:
                         h_str = f"columna_{len(cleaned)}"
                 cleaned.append(h_str)
             except Exception:
-                # Si falla, asignar nombre genérico
                 cleaned.append(f"columna_{len(cleaned)}")
         return cleaned
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        """
-        Elimina tildes y convierte a minúsculas para comparación.
-        🔥 Protegido: si recibe float, lo convierte a string.
-        """
+        """Elimina tildes y convierte a minúsculas para comparación."""
         try:
-            # Convertir a string por si acaso
             text_str = str(text) if text is not None else ""
             if not text_str:
                 return ""
-            import unicodedata
             text_str = text_str.lower()
             nfkd = unicodedata.normalize('NFKD', text_str)
             return "".join(c for c in nfkd if not unicodedata.combining(c))
@@ -237,11 +331,118 @@ class Importer:
 
 
 # ============================================================
-# 🆕 FUNCIÓN DE ENTRADA PARA LA UI (requerida por streamlit_app.py)
+# ORQUESTADOR DE IMPORTACIÓN (ExcelImporter)
 # ============================================================
-def import_excel(data: bytes, filename: str) -> pd.DataFrame:
+class ExcelImporter:
+    """Orquestador principal para importar archivos Excel con detección de headers."""
+
+    def __init__(self, max_scan_rows: int = 100, max_scan_cols: int = 30):
+        self.max_scan_rows = max_scan_rows
+        self.max_scan_cols = max_scan_cols
+
+    def import_from_bytes(self, data: bytes, filename: str) -> ImportResult:
+        """Importa un archivo Excel desde bytes y retorna ImportResult."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        try:
+            return self.import_from_path(tmp_path, filename)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def import_from_path(self, filepath: Path, filename: Optional[str] = None) -> ImportResult:
+        """Importa un archivo Excel desde una ruta y retorna ImportResult."""
+        if filename is None:
+            filename = filepath.name
+
+        result = ImportResult(filename=filename)
+        sheets_dict = pd.read_excel(filepath, sheet_name=None, header=None,
+                                    engine='openpyxl' if filepath.suffix == '.xlsx' else 'xlrd')
+
+        for sheet_name, df_raw in sheets_dict.items():
+            try:
+                if df_raw.empty:
+                    result.failed_sheets.append(SheetImportResult(
+                        sheet_name=sheet_name,
+                        success=False,
+                        error="Hoja vacía"
+                    ))
+                    continue
+
+                # Detectar header
+                header_row = Importer._detect_header_row(df_raw)
+                if header_row is None:
+                    header_row = 0
+
+                # Rescatar título
+                last_title = None
+                for idx in range(header_row):
+                    val = df_raw.iloc[idx, 0]
+                    if pd.notna(val) and str(val).strip():
+                        last_title = str(val).strip()
+
+                # Extraer datos
+                headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
+                data_rows = df_raw.iloc[header_row + 1:].copy()
+                data_rows.columns = headers
+
+                # Limpiar nombres
+                clean_headers = Importer._clean_column_names(headers)
+                data_rows.columns = clean_headers
+
+                # Eliminar filas vacías
+                data_rows = data_rows.dropna(how='all')
+                if data_rows.empty:
+                    result.failed_sheets.append(SheetImportResult(
+                        sheet_name=sheet_name,
+                        success=False,
+                        error="Sin datos después del header"
+                    ))
+                    continue
+
+                # Inyectar título huérfano
+                if last_title:
+                    new_row = {col: np.nan for col in data_rows.columns}
+                    new_row[data_rows.columns[0]] = last_title
+                    new_df = pd.DataFrame([new_row])
+                    data_rows = pd.concat([new_df, data_rows], ignore_index=True)
+
+                # Añadir hoja de origen
+                data_rows['hoja_origen'] = sheet_name
+
+                result.successful_sheets.append(SheetImportResult(
+                    sheet_name=sheet_name,
+                    success=True,
+                    dataframe=data_rows,
+                    header_result=HeaderDetectionResult(
+                        header_row=header_row,
+                        table_start=header_row + 1,
+                        confidence=1.0,
+                        strategy="heuristic"
+                    )
+                ))
+
+            except Exception as e:
+                result.failed_sheets.append(SheetImportResult(
+                    sheet_name=sheet_name,
+                    success=False,
+                    error=str(e)
+                ))
+
+        result.total_sheets = len(result.successful_sheets) + len(result.failed_sheets)
+        result.total_successful = len(result.successful_sheets)
+        result.total_failed = len(result.failed_sheets)
+        return result
+
+
+# ============================================================
+# FUNCIÓN DE ENTRADA (LA QUE USA STREAMLIT)
+# ============================================================
+def import_excel(data: bytes, filename: str) -> ImportResult:
     """
-    Función principal para importar archivos Excel desde bytes.
-    Retorna un DataFrame combinado de todas las hojas procesadas.
+    Función principal para importar archivos Excel.
+    Retorna un objeto ImportResult con las hojas procesadas.
     """
-    return Importer.read_from_bytes(data, filename)
+    importer = ExcelImporter()
+    return importer.import_from_bytes(data, filename)
