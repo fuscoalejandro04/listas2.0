@@ -11,7 +11,6 @@ from typing import Dict, List, Union, Optional, Any, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
-from backend.domain.taxonomy import TAXONOMY
 
 
 # ============================================================
@@ -173,8 +172,6 @@ class Importer:
         """
         Procesa cada hoja: detecta la fila de encabezados, limpia nombres,
         extrae los datos y los concatena en un único DataFrame.
-        🔥 MODIFICADO: Rescata el último título de la columna 0 antes del header
-        y lo inserta como primera fila para que el PipelineProcessor pueda heredarlo.
         """
         all_dfs = []
         for sheet_name, df_raw in sheets_dict.items():
@@ -187,12 +184,13 @@ class Importer:
                 if header_row is None:
                     header_row = 0
 
-                # 🔥 RESCATE DEL TÍTULO (último valor no vacío en columna 0 antes del header)
+                # 🔥 RESCATE DEL TÍTULO (Memoria a corto plazo de la columna 0)
                 last_title = None
-                for idx in range(header_row):
-                    val = df_raw.iloc[idx, 0]
-                    if pd.notna(val) and str(val).strip():
-                        last_title = str(val).strip()
+                if header_row > 0:
+                    for idx in range(header_row):
+                        val = df_raw.iloc[idx, 0]
+                        if pd.notna(val) and str(val).strip() and str(val).lower() != 'nan':
+                            last_title = str(val).strip()
 
                 # 2. Extraer encabezados y datos
                 headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
@@ -208,12 +206,11 @@ class Importer:
                 if data_rows.empty:
                     continue
 
-                # 🔥 INYECCIÓN DEL TÍTULO HUÉRFANO COMO PRIMERA FILA
+                # 🔥 INYECCIÓN SEGURA DEL TÍTULO HUÉRFANO (Sin Diccionarios)
                 if last_title:
-                    new_row = {col: np.nan for col in data_rows.columns}
-                    new_row[data_rows.columns[0]] = last_title
-                    new_df = pd.DataFrame([new_row])
-                    data_rows = pd.concat([new_df, data_rows], ignore_index=True)
+                    new_row_df = pd.DataFrame(np.nan, index=[0], columns=data_rows.columns)
+                    new_row_df.iloc[0, 0] = last_title
+                    data_rows = pd.concat([new_row_df, data_rows], ignore_index=True)
 
                 # 5. Añadir columna con el nombre de la hoja
                 data_rows['hoja_origen'] = sheet_name
@@ -233,7 +230,6 @@ class Importer:
         """
         Detecta la fila de encabezados usando una heurística avanzada.
         Retorna el índice de la fila más probable.
-        🔥 Protegido contra valores float en las celdas.
         """
         best_score = -1
         best_row = 0
@@ -296,12 +292,14 @@ class Importer:
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
-        """Limpia nombres de columnas: sin tildes, espacios reemplazados por guiones bajos, minúsculas."""
+        """Limpia nombres de columnas garantizando que sean únicos y sin nulos fantasma."""
         cleaned = []
         for h in headers:
             try:
                 h_str = str(h).strip() if h is not None else ""
-                if not h_str:
+                
+                # Prevenir colapso por "nan" string de pandas
+                if not h_str or h_str.lower() == 'nan':
                     h_str = f"columna_{len(cleaned)}"
                 else:
                     h_str = re.sub(r'[^a-zA-Z0-9áéíóúñü\s]', '', h_str)
@@ -309,8 +307,17 @@ class Importer:
                     h_str = Importer._normalize_text(h_str)
                     h_str = re.sub(r'_+', '_', h_str)
                     h_str = h_str.strip('_')
-                    if not h_str:
+                    
+                    if not h_str or h_str == 'nan':
                         h_str = f"columna_{len(cleaned)}"
+                
+                # Garantizar unicidad absoluta
+                original_h_str = h_str
+                counter = 1
+                while h_str in cleaned:
+                    h_str = f"{original_h_str}_{counter}"
+                    counter += 1
+                    
                 cleaned.append(h_str)
             except Exception:
                 cleaned.append(f"columna_{len(cleaned)}")
@@ -375,12 +382,13 @@ class ExcelImporter:
                 if header_row is None:
                     header_row = 0
 
-                # Rescatar título
+                # 🔥 RESCATE DEL TÍTULO (Memoria a corto plazo de la columna 0)
                 last_title = None
-                for idx in range(header_row):
-                    val = df_raw.iloc[idx, 0]
-                    if pd.notna(val) and str(val).strip():
-                        last_title = str(val).strip()
+                if header_row > 0:
+                    for idx in range(header_row):
+                        val = df_raw.iloc[idx, 0]
+                        if pd.notna(val) and str(val).strip() and str(val).lower() != 'nan':
+                            last_title = str(val).strip()
 
                 # Extraer datos
                 headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
@@ -401,12 +409,11 @@ class ExcelImporter:
                     ))
                     continue
 
-                # Inyectar título huérfano
+                # 🔥 INYECCIÓN SEGURA DEL TÍTULO HUÉRFANO (Sin Diccionarios)
                 if last_title:
-                    new_row = {col: np.nan for col in data_rows.columns}
-                    new_row[data_rows.columns[0]] = last_title
-                    new_df = pd.DataFrame([new_row])
-                    data_rows = pd.concat([new_df, data_rows], ignore_index=True)
+                    new_row_df = pd.DataFrame(np.nan, index=[0], columns=data_rows.columns)
+                    new_row_df.iloc[0, 0] = last_title
+                    data_rows = pd.concat([new_row_df, data_rows], ignore_index=True)
 
                 # Añadir hoja de origen
                 data_rows['hoja_origen'] = sheet_name
