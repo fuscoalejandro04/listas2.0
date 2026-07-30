@@ -1,7 +1,7 @@
 """
 Módulo Procesador - Orquesta todo el pipeline ETL.
 Ya no depende de importers, recibe el DataFrame directamente.
-Integra la consolidación y normalización estructural de columnas.
+Integra la consolidación, normalización estructural, enriquecimiento IA y validación.
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
@@ -11,15 +11,23 @@ from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
 from backend.pipelines.context_detector import ContextDetector, FileContext
+from backend.pipelines.ai_enricher import AIEnricher   # 🆕 nuevo módulo
 
 
 class PipelineProcessor:
     """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
 
-    def __init__(self, confidence_threshold: float = 0.6):
+    def __init__(self, 
+                 confidence_threshold: float = 0.6,
+                 enable_ai: bool = True,
+                 ai_model: str = "gpt-4o-mini",
+                 ai_batch_size: int = 20):
         self.mapper = ColumnMapper(confidence_threshold)
         self.normalizer = DataNormalizer()   # se crea sin contexto; se asignará en process()
         self.validator = Validator()
+        self.enable_ai = enable_ai
+        if self.enable_ai:
+            self.ai_enricher = AIEnricher(model=ai_model, batch_size=ai_batch_size)
 
     def normalize_and_consolidate(
         self, df: pd.DataFrame, mapping: Dict[str, Tuple[Optional[str], float]]
@@ -60,7 +68,7 @@ class PipelineProcessor:
         # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
         df.columns = df.columns.astype(str)
 
-        # 🔥 Detectar contexto global (moneda y unidad por defecto)
+        # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
         context = FileContext()
         context.currency = ContextDetector.detect_currency(df)
         context.default_unit = ContextDetector.detect_unit(df)
@@ -76,7 +84,7 @@ class PipelineProcessor:
         df_clean = self.normalize_and_consolidate(df, mapping)
 
         # ------------------------------------------------------------
-        # FILTROS DE LIMPIEZA DE FILAS BASURA (sin cambios)
+        # FILTROS DE LIMPIEZA DE FILAS BASURA
         # ------------------------------------------------------------
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
@@ -96,13 +104,17 @@ class PipelineProcessor:
             mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
             df_clean = df_clean[~mascara_encabezado]
 
-        # 2. Normalización de Datos (ahora con contexto)
+        # 2. Normalización de Datos (síntesis de atributos)
         normalized_products = []
         for _, row in df_clean.iterrows():
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
 
-        # 3. Validación
+        # 🔥 2.5 ENRIQUECIMIENTO SEMÁNTICO CON IA
+        if self.enable_ai and self.ai_enricher:
+            normalized_products = self.ai_enricher.enrich(normalized_products)
+
+        # 3. Validación (ahora con campos enriquecidos)
         validation_report = self.validator.validate_all(normalized_products)
 
         # 4. Detectar duplicados (básico por código)
