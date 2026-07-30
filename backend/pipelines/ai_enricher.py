@@ -3,17 +3,19 @@ Módulo de Enriquecimiento Semántico con IA (LLM).
 Razona sobre los datos crudos para inferir campos semánticos como:
 - Categoría real (corregida)
 - Línea/Calidad del producto (Classic, Professional, Expert, etc.)
-- Unidad de medida implícita (si no se detectó por regex)
 """
 import json
 import hashlib
+import os  # 🔥 IMPORTS FALTANTE
 from typing import List, Dict, Any, Optional
-import pandas as pd
+
 
 class AIEnricher:
     """
     Enriquece productos normalizados usando un LLM.
     Se inyecta en el PipelineProcessor.
+    
+    Modo simulación: si no hay API key, devuelve valores de ejemplo para pruebas.
     """
     
     def __init__(self, 
@@ -21,37 +23,42 @@ class AIEnricher:
                  model: str = "gpt-4o-mini",
                  batch_size: int = 20,
                  max_tokens: int = 500,
-                 temperature: float = 0.1):
+                 temperature: float = 0.1,
+                 simulate: bool = False):
         """
         Args:
-            api_key: Clave de API (desde config o env)
+            api_key: Clave de API (desde config o env). Si es None, intenta usar OPENAI_API_KEY.
             model: Modelo a usar (OpenAI, Gemini, etc.)
             batch_size: Número de productos por lote (para reducir costos)
             max_tokens: Máximo de tokens por respuesta
             temperature: Temperatura del LLM (baja para respuestas deterministas)
+            simulate: Si True, no llama a la API real y devuelve datos simulados.
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model
         self.batch_size = batch_size
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.simulate = simulate or not self.api_key  # Si no hay key, activar simulación
         self.cache = {}  # Cache simple en memoria (hash → resultado)
+        
+        if self.simulate:
+            print("⚠️ AIEnricher en modo SIMULACIÓN (sin API key). Los enriquecimientos serán ficticios.")
         
     def enrich(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Enrriquece una lista de productos con campos inferidos por LLM.
+        Enriquece una lista de productos con campos inferidos por LLM.
         Retorna la misma lista pero con campos adicionales.
         """
         if not products:
             return products
         
         # 1. Identificar productos que necesitan enriquecimiento
-        #    (ej. los que tienen 'categoria' con estrellas o campos vacíos)
         to_enrich = []
         indices = []
         for idx, p in enumerate(products):
-            # Ejemplo: si categoría contiene ★ o está vacía, o falta linea_producto
             cat = p.get('categoria', '')
+            # Si categoría tiene estrellas, está vacía, o no tiene linea_producto
             if (not cat or '★' in cat or '⭐' in cat or 
                 not p.get('linea_producto')):
                 to_enrich.append(p)
@@ -70,30 +77,57 @@ class AIEnricher:
         # 3. Aplicar los resultados enriquecidos a los productos originales
         for idx, enriched in zip(indices, enriched_results):
             if enriched:
-                # Fusionar: mantener los campos originales, pero sobreescribir
-                # los que el LLM haya inferido (si tienen confianza alta)
                 products[idx].update(enriched)
         
         return products
     
     def _enrich_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Enrriquece un lote de productos con una sola llamada al LLM.
-        """
-        # Construir prompt
+        """Enriquece un lote con una sola llamada al LLM."""
+        if self.simulate:
+            return self._simulate_enrichment(batch)
+        
         prompt = self._build_prompt(batch)
-        
-        # Llamar al LLM (abstraído para soportar múltiples proveedores)
         response = self._call_llm(prompt)
-        
-        # Parsear respuesta JSON
         return self._parse_response(response, batch)
     
+    def _simulate_enrichment(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Simula el enriquecimiento sin llamar a la API.
+        Útil para pruebas sin costo.
+        """
+        results = []
+        for p in batch:
+            categoria_original = p.get('categoria', '')
+            # Detectar línea de producto a partir de palabras clave en la categoría original
+            linea = None
+            categoria_razonada = categoria_original
+            
+            # Limpiar estrellas y palabras de línea
+            for palabra in ['CLASSIC', 'PROFESSIONAL', 'EXPERT', 'PREMIUM', 'BASIC']:
+                if palabra in categoria_original.upper():
+                    linea = palabra.capitalize()
+                    categoria_razonada = categoria_original.replace('★', '').replace('⭐', '').strip()
+                    # Remover la palabra de línea de la categoría
+                    categoria_razonada = categoria_razonada.replace(palabra, '').replace(palabra.capitalize(), '').strip()
+                    break
+            
+            # Si no se detectó línea, intentar inferir por modelo o descripción
+            if not linea:
+                modelo = p.get('modelo', '')
+                if 'PRO' in modelo.upper() or 'BL' in modelo.upper():
+                    linea = 'Professional'
+                elif 'TC' in modelo.upper():
+                    linea = 'Classic'
+            
+            results.append({
+                'categoria': categoria_razonada if categoria_razonada else None,
+                'linea_producto': linea,
+                'confianza_ia': 0.85  # simulado
+            })
+        return results
+    
     def _build_prompt(self, batch: List[Dict[str, Any]]) -> str:
-        """
-        Construye el prompt few-shot para el LLM.
-        """
-        # Serializar los productos de forma legible
+        """Construye el prompt few-shot para el LLM."""
         products_text = []
         for idx, p in enumerate(batch):
             text = f"""
@@ -145,16 +179,11 @@ Salida esperada:
         return prompt
     
     def _call_llm(self, prompt: str) -> str:
-        """
-        Llama al LLM (abstracción para OpenAI, Gemini, etc.)
-        Aquí se usa OpenAI por simplicidad, pero se puede intercambiar.
-        """
-        # Verificar caché
+        """Llama al LLM con caché."""
         cache_key = hashlib.md5(prompt.encode()).hexdigest()
         if cache_key in self.cache:
             return self.cache[cache_key]
         
-        # Importar cliente OpenAI (se puede hacer pluggable)
         try:
             from openai import OpenAI
             client = OpenAI(api_key=self.api_key)
@@ -167,32 +196,28 @@ Salida esperada:
                 ],
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                response_format={"type": "json_object"}  # Forzamos JSON
+                response_format={"type": "json_object"}
             )
             result = response.choices[0].message.content
             self.cache[cache_key] = result
             return result
         except ImportError:
-            # Fallback si no está instalado openai
+            print("⚠️ OpenAI no está instalado. Cambiando a modo simulación.")
+            self.simulate = True
             return '{"results": []}'
         except Exception as e:
-            # Log del error y retornar vacío
-            print(f"Error en LLM: {e}")
+            print(f"Error en LLM: {e}. Cambiando a modo simulación.")
+            self.simulate = True
             return '{"results": []}'
     
     def _parse_response(self, response: str, batch: List[Dict]) -> List[Dict[str, Any]]:
-        """
-        Parsea la respuesta del LLM y la asigna a los productos.
-        """
+        """Parsea la respuesta del LLM."""
         try:
             data = json.loads(response)
             results = data.get('results', [])
-            
-            # Si el LLM devolvió menos resultados que el batch, completar con vacíos
             if len(results) < len(batch):
                 results.extend([{} for _ in range(len(batch) - len(results))])
             
-            # Mapear a los nombres de campos de la taxonomía
             enriched = []
             for r in results:
                 enriched.append({
@@ -201,7 +226,6 @@ Salida esperada:
                     'confianza_ia': r.get('confianza', 0.0)
                 })
             return enriched
-            
         except json.JSONDecodeError:
-            # Si falla el parseo, devolver vacíos
-            return [{} for _ in batch]
+            print("⚠️ Error al parsear respuesta del LLM. Usando simulación.")
+            return self._simulate_enrichment(batch)
