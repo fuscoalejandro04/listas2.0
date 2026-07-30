@@ -38,6 +38,22 @@ fields:
       - "description"
       - "descripción"
 
+  # 🆕 NUEVO CAMPO: Dimensiones (separado de descripcion para evitar colisiones)
+  - name: dimensiones
+    data_type: string
+    required: false
+    description: "Dimensiones, medidas, tamaño o especificaciones numéricas del producto (ej. 13mm, 100x50cm, 1/2\")"
+    aliases:
+      - "medidas"
+      - "tamaño"
+      - "talla"
+      - "proporciones"
+      - "dimension"
+      - "tam"
+      - "medida"
+      - "especificaciones"
+      - "especificación"
+
   - name: marca
     data_type: string
     required: false
@@ -147,9 +163,6 @@ fields:
       - "moneda"
       - "divisa"
 
-  # ═══════════════════════════════════════════════════════════════════
-  # 🆕 NUEVO CAMPO: UNIDAD DE MEDIDA (para normalización multi-rubro)
-  # ═══════════════════════════════════════════════════════════════════
   - name: unidad_medida
     data_type: string
     required: false
