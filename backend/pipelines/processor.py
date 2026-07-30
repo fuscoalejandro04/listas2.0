@@ -20,14 +20,13 @@ class PipelineProcessor:
     def __init__(self, 
                  confidence_threshold: float = 0.6,
                  enable_ai: bool = True,
-                 ai_model: str = "gpt-4o-mini",
-                 ai_batch_size: int = 20):
+                 ai_model: str = "gpt-4o-mini"):
         self.mapper = ColumnMapper(confidence_threshold)
         self.normalizer = DataNormalizer()   # se crea sin contexto; se asignará en process()
         self.validator = Validator()
         self.enable_ai = enable_ai
         if self.enable_ai:
-            self.ai_enricher = AIEnricher(model=ai_model, batch_size=ai_batch_size)
+            self.ai_enricher = AIEnricher(model=ai_model)  # 🔥 batch_size eliminado
 
     def normalize_and_consolidate(
         self, df: pd.DataFrame, mapping: Dict[str, Tuple[Optional[str], float]]
@@ -110,7 +109,7 @@ class PipelineProcessor:
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
 
-        # 🔥 2.5 ENRIQUECIMIENTO SEMÁNTICO CON IA
+        # 🔥 2.5 ENRIQUECIMIENTO SEMÁNTICO CON IA (AHORA OPTIMIZADO)
         if self.enable_ai and self.ai_enricher:
             normalized_products = self.ai_enricher.enrich(normalized_products)
 
