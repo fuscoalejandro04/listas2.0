@@ -35,7 +35,6 @@ class ContextDetector:
         que parecen contener números con símbolos de moneda).
         """
         # 1. Revisar primeras 20 filas en busca de palabras clave
-        # 🔥 FIX: forzar conversión a str dentro del join para evitar TypeError
         top_text = df.iloc[:20].astype(str).apply(
             lambda x: ' '.join(str(v) for v in x), axis=1
         ).str.cat(sep=' ')
@@ -51,7 +50,7 @@ class ContextDetector:
             if pat in top_text:
                 return 'ARS'
 
-        # 2. Analizar las columnas que parecen precios (con números y símbolos)
+        # 2. Analizar las columnas que parecen precios
         price_cols = []
         for col in df.columns:
             sample = df[col].dropna().astype(str).head(sample_rows)
@@ -92,7 +91,6 @@ class ContextDetector:
         if not desc_cols:
             return None
 
-        # 🔥 FIX: forzar conversión a str dentro del join
         all_desc = ' '.join(
             str(v) for v in df[desc_cols].dropna().astype(str).apply(
                 lambda x: ' '.join(str(v) for v in x), axis=1
