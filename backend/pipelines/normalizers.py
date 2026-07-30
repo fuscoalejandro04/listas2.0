@@ -1,9 +1,11 @@
 """
 Módulo de Normalización - Limpia y tipifica los datos crudos.
-Ahora con detección de contexto (moneda y unidades) y extracción de unidades desde descripciones.
+Ahora con detección de contexto (moneda y unidades), extracción de unidades,
+limpieza universal y síntesis de atributos (marca, nombre, dimensiones).
 """
 import pandas as pd
 import re
+import unicodedata
 from typing import Dict, Any, Optional, Callable, Tuple
 
 from backend.pipelines.context_detector import FileContext
@@ -24,10 +26,11 @@ class DataNormalizer:
             'codigo': self._normalize_codigo,
             'nombre_articulo': self._normalize_text,
             'descripcion': self._normalize_text,
-            'dimensiones': self._normalize_text,        # 🆕 NUEVO CAMPO
+            'dimensiones': self._normalize_text,
             'categoria': self._normalize_text,
             'marca': self._normalize_text,
             'modelo': self._normalize_text,
+            'linea_producto': self._normalize_text,   # 🆕 campo para IA
             'ean': self._normalize_ean,
             'precio_lista': self._normalize_price_with_currency,
             'precio_sugerido': self._normalize_price_with_currency,
@@ -76,12 +79,12 @@ class DataNormalizer:
                     normalized[field] = normalizer_func(raw_value)
 
         # ============================================================
-        # 🔥 PASO 2: SÍNTESIS DE ATRIBUTOS FALTANTES (AHORA CON DIMENSIONES)
+        # 🔥 PASO 2: SÍNTESIS DE ATRIBUTOS FALTANTES (CON DIMENSIONES)
         # ============================================================
         # Asegurar que todos los campos existen en el diccionario
         normalized.setdefault('marca', None)
         normalized.setdefault('modelo', None)
-        normalized.setdefault('dimensiones', None)   # 🆕
+        normalized.setdefault('dimensiones', None)
         normalized.setdefault('descripcion', None)
         normalized.setdefault('nombre_articulo', None)
         normalized.setdefault('hoja_origen', None)
@@ -128,13 +131,39 @@ class DataNormalizer:
 
     # ---------- Funciones de normalización específicas ----------
     def _normalize_text(self, value: Any) -> Optional[str]:
-        """Limpia y convierte a string, maneja nulos."""
+        """
+        Limpia y convierte a string, maneja nulos.
+        🔥 UNIVERSAL CLEANING: elimina caracteres decorativos (★, ®, ™, emojis, etc.)
+        pero conserva letras (incluyendo acentos), números, espacios y puntuación gramatical estándar.
+        """
         if pd.isna(value):
             return None
+
+        # Convertir a string y eliminar espacios extremos
         if isinstance(value, str):
             cleaned = value.strip()
-            return cleaned if cleaned else None
-        return str(value).strip()
+        else:
+            cleaned = str(value).strip()
+
+        if not cleaned:
+            return None
+
+        # 🔥 PASO 1: Normalizar Unicode (NFKC convierte caracteres especiales a formas base)
+        # Ej: ㎏ → kg, pero é → é (lo conservamos)
+        normalized = unicodedata.normalize('NFKC', cleaned)
+
+        # 🔥 PASO 2: Eliminar todo lo que NO sea:
+        # - Letras (incluyendo acentos y ñ) -> \w (con flag UNICODE)
+        # - Números -> \d
+        # - Espacios -> \s
+        # - Puntuación gramatical estándar: . , ; : ( ) - / %
+        # NOTA: El patrón usa [^\w\s.,;:()\-/%] que significa "cualquier cosa que NO esté en esta lista"
+        cleaned = re.sub(r'[^\w\s.,;:()\-/%]', '', normalized, flags=re.UNICODE)
+
+        # 🔥 PASO 3: Limpiar espacios múltiples
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+        return cleaned if cleaned else None
 
     def _normalize_codigo(self, value: Any) -> Optional[str]:
         """Código: se espera string numérico o alfanumérico."""
