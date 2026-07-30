@@ -30,7 +30,7 @@ class DataNormalizer:
             'categoria': self._normalize_text,
             'marca': self._normalize_text,
             'modelo': self._normalize_text,
-            'linea_producto': self._normalize_text,   # 🆕 campo para IA
+            'linea_producto': self._normalize_text,
             'ean': self._normalize_ean,
             'precio_lista': self._normalize_price_with_currency,
             'precio_sugerido': self._normalize_price_with_currency,
@@ -39,6 +39,10 @@ class DataNormalizer:
             'iva': self._normalize_iva,
             'moneda': self._normalize_moneda,
             'unidad_medida': self._normalize_unit,
+            # 🆕 NUEVOS CAMPOS PARA CATÁLOGOS CPSA
+            'unidad_precio': self._normalize_unidad_precio,
+            'cantidad_por_caja': self._normalize_cantidad_por_caja,
+            'embalaje': self._normalize_text,
             'hoja_origen': self._normalize_text,
         }
 
@@ -265,7 +269,6 @@ class DataNormalizer:
                 return cleaned.upper()
         return self.context.currency
 
-    # 🔥 CORRECCIÓN: Método _normalize_unit con filtro estricto de empaque comercial
     def _normalize_unit(self, value: Any) -> Optional[str]:
         """
         🔥 CORREGIDO: Extrae UNIDAD DE VENTA COMERCIAL (empaque) usando límites de palabra estricta.
@@ -300,3 +303,50 @@ class DataNormalizer:
                 return unit
 
         return default_comercial
+
+    # 🆕 NUEVOS MÉTODOS PARA CATÁLOGOS CPSA
+    def _normalize_unidad_precio(self, value: Any) -> Optional[str]:
+        """
+        🔥 NUEVO: Normaliza la unidad de precio (base de cotización).
+        Soporta números (100, 1000) y strings cortos (BOLSA, GRANEL, CAJA).
+        """
+        if pd.isna(value):
+            return None
+        
+        if isinstance(value, (int, float)):
+            # Si es número entero, convertirlo a string sin decimales
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value)
+        
+        if isinstance(value, str):
+            cleaned = value.strip().upper()
+            # Si es un número dentro de un string
+            if cleaned.isdigit():
+                return cleaned
+            # Si es texto corto (probable unidad especial)
+            if len(cleaned) <= 15:
+                return cleaned
+            # Si es muy largo, probable no sea una unidad de precio
+            return None
+        
+        return str(value).strip() if value else None
+
+    def _normalize_cantidad_por_caja(self, value: Any) -> Optional[int]:
+        """
+        🔥 NUEVO: Normaliza cantidad por caja a entero.
+        """
+        if pd.isna(value):
+            return None
+        
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            return int(value) if value > 0 else None
+        
+        if isinstance(value, str):
+            cleaned = re.sub(r'[^0-9]', '', value.strip())
+            if cleaned.isdigit():
+                return int(cleaned)
+        
+        return None
