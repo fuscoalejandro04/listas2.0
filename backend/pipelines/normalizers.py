@@ -28,7 +28,7 @@ class DataNormalizer:
             'precio_2': self._normalize_price_with_currency,
             'precio_3': self._normalize_price_with_currency,
             'iva': self._normalize_iva,
-            'moneda': self._normalize_text,      # Se usa si viene explícita, o la extraemos del precio
+            'moneda': self._normalize_moneda,    # <-- NUEVA: función específica para moneda
             'hoja_origen': self._normalize_text,
         }
         # Patrones de moneda para extracción
@@ -164,4 +164,20 @@ class DataNormalizer:
                 return num
             except ValueError:
                 return None
+        return None
+
+    def _normalize_moneda(self, value: Any) -> Optional[str]:
+        """
+        🔥 NUEVA FUNCIÓN: Normaliza la moneda filtrando ruido.
+        Solo devuelve el valor si es una cadena corta (≤ 4 caracteres).
+        Esto evita que descripciones largas se confundan con moneda.
+        """
+        if pd.isna(value):
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            # Si tiene más de 4 caracteres, es ruido (descripción larga)
+            if len(cleaned) > 4:
+                return None
+            return cleaned.upper() if cleaned else None
         return None
