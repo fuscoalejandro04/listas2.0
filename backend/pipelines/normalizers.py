@@ -24,6 +24,7 @@ class DataNormalizer:
             'codigo': self._normalize_codigo,
             'nombre_articulo': self._normalize_text,
             'descripcion': self._normalize_text,
+            'dimensiones': self._normalize_text,        # 🆕 NUEVO CAMPO
             'categoria': self._normalize_text,
             'marca': self._normalize_text,
             'modelo': self._normalize_text,
@@ -34,7 +35,7 @@ class DataNormalizer:
             'precio_3': self._normalize_price_with_currency,
             'iva': self._normalize_iva,
             'moneda': self._normalize_moneda,
-            'unidad_medida': self._normalize_unit,      # <-- extrae desde descripción
+            'unidad_medida': self._normalize_unit,
             'hoja_origen': self._normalize_text,
         }
 
@@ -75,11 +76,12 @@ class DataNormalizer:
                     normalized[field] = normalizer_func(raw_value)
 
         # ============================================================
-        # 🔥 PASO 2: SÍNTESIS DE ATRIBUTOS FALTANTES
+        # 🔥 PASO 2: SÍNTESIS DE ATRIBUTOS FALTANTES (AHORA CON DIMENSIONES)
         # ============================================================
         # Asegurar que todos los campos existen en el diccionario
         normalized.setdefault('marca', None)
         normalized.setdefault('modelo', None)
+        normalized.setdefault('dimensiones', None)   # 🆕
         normalized.setdefault('descripcion', None)
         normalized.setdefault('nombre_articulo', None)
         normalized.setdefault('hoja_origen', None)
@@ -94,25 +96,33 @@ class DataNormalizer:
                     normalized['marca'] = 'EINHELL'
                 elif 'KWB' in hoja_upper:
                     normalized['marca'] = 'KWB'
-                # Si no coincide, se deja como estaba (None o vacío)
 
-        # 2. Sintetizar nombre_articulo si está vacío
+        # 2. Sintetizar nombre_articulo si está vacío (CON DIMENSIONES)
         nombre = normalized.get('nombre_articulo')
         if not nombre or nombre.strip() == '':
             marca_final = normalized.get('marca', '')
             modelo = normalized.get('modelo', '')
+            dimensiones = normalized.get('dimensiones', '')
             desc = normalized.get('descripcion', '')
 
-            # 2a. Si hay marca y modelo, concatenarlos
-            if marca_final and modelo:
-                normalized['nombre_articulo'] = f"{marca_final} {modelo}".strip()
+            # 2a. Construir nombre con Marca + Modelo + Dimensiones (si existen)
+            nombre_parts = []
+            if marca_final:
+                nombre_parts.append(marca_final)
+            if modelo:
+                nombre_parts.append(modelo)
+            if dimensiones:
+                nombre_parts.append(dimensiones)
+
+            if nombre_parts:
+                normalized['nombre_articulo'] = " ".join(nombre_parts).strip()
             # 2b. Fallback: usar primeros 60 caracteres de descripcion
             elif desc:
                 truncated = desc[:60]
                 if len(desc) > 60:
                     truncated += '...'
                 normalized['nombre_articulo'] = truncated
-            # 2c. Si no hay nada, dejar vacío (ya está None)
+            # 2c. Si no hay nada, dejar vacío
 
         return normalized
 
