@@ -53,12 +53,20 @@ class Validator:
                 'severity': 'error'
             })
 
-        if not product.get('nombre_articulo', ''):
+        # 🔥 CALIBRACIÓN: nombre_articulo solo es warning si también faltan modelo y descripcion
+        nombre = product.get('nombre_articulo', '')
+        modelo = product.get('modelo', '')
+        descripcion = product.get('descripcion', '')
+
+        if not nombre and not modelo and not descripcion:
             issues.append({
                 'field': 'nombre_articulo',
-                'message': 'Nombre del artículo vacío',
+                'message': 'Nombre del artículo, modelo y descripción vacíos',
                 'severity': 'warning'
             })
+        elif not nombre and (modelo or descripcion):
+            # Si falta nombre pero hay modelo o descripcion, no es warning (se puede inferir)
+            pass
 
         # --- Precio ---
         price = product.get('precio_lista')
