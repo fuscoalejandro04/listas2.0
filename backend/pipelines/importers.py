@@ -1,6 +1,6 @@
 """
 Módulo de Importadores - Adaptadores para leer datos desde diferentes fuentes.
-Soporte para Excel con encabezados en filas no estándar (detección automática).
+Soporte para Excel con encabezados en filas no estándar (detección automática robusta).
 """
 import pandas as pd
 import io
@@ -11,6 +11,7 @@ from typing import Dict, List, Union, Optional, Any, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
+from backend.domain.taxonomy import TAXONOMY
 
 
 # ============================================================
@@ -108,7 +109,7 @@ class TypeClassifier:
             return CellType.BOOLEAN
         if isinstance(value, (int, float)):
             return CellType.NUMBER
-        if isinstance(value, pd.Timestamp) or isinstance(value, pd.Timestamp):
+        if isinstance(value, pd.Timestamp):
             return CellType.DATE
         if isinstance(value, str):
             stripped = value.strip()
@@ -132,10 +133,10 @@ class TypeClassifier:
 
 
 # ============================================================
-# IMPORTER PRINCIPAL
+# IMPORTER PRINCIPAL (MÉTODOS BLINDADOS)
 # ============================================================
 class Importer:
-    """Importador que detecta automaticamente la fila de encabezados en cada hoja."""
+    """Importador con detección robusta de encabezados."""
 
     @staticmethod
     def read(file_path: Union[str, Path]) -> pd.DataFrame:
@@ -172,6 +173,7 @@ class Importer:
         """
         Procesa cada hoja: detecta la fila de encabezados, limpia nombres,
         extrae los datos y los concatena en un único DataFrame.
+        Usa el método robusto _detect_header_row.
         """
         all_dfs = []
         for sheet_name, df_raw in sheets_dict.items():
@@ -179,25 +181,17 @@ class Importer:
                 if df_raw.empty:
                     continue
 
-                # 1. Detectar la fila de encabezados en esta hoja
+                # 1. Detectar la fila de encabezados usando el método blindado
                 header_row = Importer._detect_header_row(df_raw)
                 if header_row is None:
                     header_row = 0
-
-                # 🔥 RESCATE DEL TÍTULO (Memoria a corto plazo de la columna 0)
-                last_title = None
-                if header_row > 0:
-                    for idx in range(header_row):
-                        val = df_raw.iloc[idx, 0]
-                        if pd.notna(val) and str(val).strip() and str(val).lower() != 'nan':
-                            last_title = str(val).strip()
 
                 # 2. Extraer encabezados y datos
                 headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
                 data_rows = df_raw.iloc[header_row + 1:].copy()
                 data_rows.columns = headers
 
-                # 3. Limpiar nombres de columnas
+                # 3. Limpiar nombres de columnas (con protección de unicidad)
                 clean_headers = Importer._clean_column_names(headers)
                 data_rows.columns = clean_headers
 
@@ -205,12 +199,6 @@ class Importer:
                 data_rows = data_rows.dropna(how='all')
                 if data_rows.empty:
                     continue
-
-                # 🔥 INYECCIÓN SEGURA DEL TÍTULO HUÉRFANO (Sin Diccionarios)
-                if last_title:
-                    new_row_df = pd.DataFrame(np.nan, index=[0], columns=data_rows.columns)
-                    new_row_df.iloc[0, 0] = last_title
-                    data_rows = pd.concat([new_row_df, data_rows], ignore_index=True)
 
                 # 5. Añadir columna con el nombre de la hoja
                 data_rows['hoja_origen'] = sheet_name
@@ -228,63 +216,90 @@ class Importer:
     @staticmethod
     def _detect_header_row(df: pd.DataFrame) -> Optional[int]:
         """
-        Detecta la fila de encabezados usando una heurística avanzada.
-        Retorna el índice de la fila más probable.
+        🔥 VERSIÓN BLINDADA: Detecta la fila de encabezados usando Python puro.
+        No usa .astype(str).str.strip() encadenado.
+        Itera sobre los valores de la fila como lista y limpia manualmente.
         """
-        best_score = -1
-        best_row = 0
+        if df.empty:
+            return None
 
-        keywords = set([
+        # Palabras clave que suelen aparecer en encabezados
+        keywords = {
             'codigo', 'código', 'sku', 'modelo', 'descripción', 'descripcion',
             'precio', 'precio_lista', 'pvp', 'iva', 'ean', 'marca', 'categoría', 'categoria',
             'nombre', 'artículo', 'articulo', 'detalle', 'denominación', 'denominacion',
             'cantidad', 'unidad', 'peso', 'alto', 'ancho', 'profundidad', 'color',
             'talla', 'tamaño', 'stock', 'inventario', 'proveedor', 'fabricante'
-        ])
+        }
 
-        for row_idx in range(min(50, len(df))):
-            try:
-                row_values = df.iloc[row_idx].astype(str).str.strip()
-                non_empty = [v for v in row_values if v and v not in ['nan', 'none', '']]
-                if len(non_empty) == 0:
+        best_score = -1
+        best_row = 0
+
+        # Limitar a las primeras 50 filas
+        max_rows = min(50, len(df))
+
+        for row_idx in range(max_rows):
+            # Obtener los valores de la fila como lista (Pandas nativo, pero sin encadenar métodos)
+            row_values = df.iloc[row_idx].values
+
+            # Limpiar cada valor: convertir a string, quitar espacios, descartar vacíos y 'nan'
+            clean_values = []
+            for v in row_values:
+                if pd.isna(v):
                     continue
+                v_str = str(v).strip()
+                if v_str and v_str.lower() != 'nan':
+                    clean_values.append(v_str)
 
-                non_empty_ratio = len(non_empty) / len(row_values)
-                keyword_count = 0
-                numeric_count = 0
-                for val in non_empty:
-                    val_lower = val.lower()
-                    for k in keywords:
-                        if k in val_lower:
-                            keyword_count += 1
-                            break
-                    if re.match(r'^[0-9]+$', val_lower.replace('.', '').replace(',', '').strip()):
-                        numeric_count += 1
-
-                keyword_ratio = keyword_count / len(non_empty) if len(non_empty) > 0 else 0
-                numeric_penalty = numeric_count / len(non_empty) if len(non_empty) > 0 else 0
-                text_ratio = 1 - numeric_penalty
-
-                bonus = 0
-                for val in non_empty:
-                    val_lower = val.lower()
-                    if 'ean' in val_lower or 'código' in val_lower or 'codigo' in val_lower:
-                        bonus += 3
-                    if 'precio' in val_lower or 'pvp' in val_lower:
-                        bonus += 2
-
-                avg_len = sum(len(v) for v in non_empty) / len(non_empty) if len(non_empty) > 0 else 0
-                length_penalty = 1 if avg_len > 50 else 0
-
-                score = (non_empty_ratio * 2) + (keyword_ratio * 5) + (text_ratio * 2) + bonus - (length_penalty * 2)
-
-                if score > best_score:
-                    best_score = score
-                    best_row = row_idx
-
-            except Exception:
+            if not clean_values:
                 continue
 
+            # 1. Porcentaje de celdas no vacías (sobre el total de la fila)
+            non_empty_ratio = len(clean_values) / len(row_values)
+
+            # 2. Contar palabras clave y números
+            keyword_count = 0
+            numeric_count = 0
+            for val in clean_values:
+                val_lower = val.lower()
+                # Palabras clave
+                matched = False
+                for kw in keywords:
+                    if kw in val_lower:
+                        keyword_count += 1
+                        matched = True
+                        break
+                # Números (removiendo puntos y comas)
+                if not matched:
+                    cleaned_num = re.sub(r'[.,]', '', val_lower)
+                    if cleaned_num.isdigit():
+                        numeric_count += 1
+
+            keyword_ratio = keyword_count / len(clean_values) if clean_values else 0
+            numeric_penalty = numeric_count / len(clean_values) if clean_values else 0
+            text_ratio = 1 - numeric_penalty
+
+            # Bonus por palabras muy relevantes (ean, codigo, precio)
+            bonus = 0
+            for val in clean_values:
+                val_lower = val.lower()
+                if 'ean' in val_lower or 'código' in val_lower or 'codigo' in val_lower:
+                    bonus += 3
+                if 'precio' in val_lower or 'pvp' in val_lower:
+                    bonus += 2
+
+            # Penalizar si los valores son muy largos (probable descripción)
+            avg_len = sum(len(v) for v in clean_values) / len(clean_values) if clean_values else 0
+            length_penalty = 1 if avg_len > 50 else 0
+
+            # Puntuación final
+            score = (non_empty_ratio * 2) + (keyword_ratio * 5) + (text_ratio * 2) + bonus - (length_penalty * 2)
+
+            if score > best_score:
+                best_score = score
+                best_row = row_idx
+
+        # Si la mejor puntuación es muy baja (menos de 1), devolvemos 0 (primera fila) como fallback
         if best_score < 1.0:
             return 0
 
@@ -292,49 +307,54 @@ class Importer:
 
     @staticmethod
     def _clean_column_names(headers: List[str]) -> List[str]:
-        """Limpia nombres de columnas garantizando que sean únicos y sin nulos fantasma."""
+        """
+        🔥 VERSIÓN BLINDADA: Limpia nombres de columnas y garantiza unicidad.
+        - Convierte a string.
+        - Si está vacío o es 'nan', asigna nombre genérico.
+        - Normaliza con NFKD (sin tildes, minúsculas).
+        - Asegura unicidad con while loop (añade sufijo _1, _2, etc.).
+        """
         cleaned = []
-        for h in headers:
-            try:
-                h_str = str(h).strip() if h is not None else ""
-                
-                # Prevenir colapso por "nan" string de pandas
-                if not h_str or h_str.lower() == 'nan':
-                    h_str = f"columna_{len(cleaned)}"
-                else:
-                    h_str = re.sub(r'[^a-zA-Z0-9áéíóúñü\s]', '', h_str)
-                    h_str = h_str.replace(' ', '_').lower()
-                    h_str = Importer._normalize_text(h_str)
-                    h_str = re.sub(r'_+', '_', h_str)
-                    h_str = h_str.strip('_')
-                    
-                    if not h_str or h_str == 'nan':
-                        h_str = f"columna_{len(cleaned)}"
-                
-                # Garantizar unicidad absoluta
-                original_h_str = h_str
-                counter = 1
-                while h_str in cleaned:
-                    h_str = f"{original_h_str}_{counter}"
-                    counter += 1
-                    
-                cleaned.append(h_str)
-            except Exception:
-                cleaned.append(f"columna_{len(cleaned)}")
-        return cleaned
 
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        """Elimina tildes y convierte a minúsculas para comparación."""
-        try:
-            text_str = str(text) if text is not None else ""
-            if not text_str:
-                return ""
-            text_str = text_str.lower()
-            nfkd = unicodedata.normalize('NFKD', text_str)
-            return "".join(c for c in nfkd if not unicodedata.combining(c))
-        except Exception:
-            return ""
+        for h in headers:
+            # 1. Convertir a string y limpiar espacios
+            h_str = str(h).strip() if h is not None else ""
+
+            # 2. Si quedó vacío o es 'nan', asignar nombre genérico
+            if not h_str or h_str.lower() == 'nan':
+                base_name = f"columna_{len(cleaned)}"
+            else:
+                # 3. Eliminar caracteres especiales (solo letras, números, espacios)
+                h_str = re.sub(r'[^a-zA-Z0-9áéíóúñü\s]', '', h_str)
+                # 4. Reemplazar espacios por guiones bajos
+                h_str = h_str.replace(' ', '_')
+                # 5. Convertir a minúsculas
+                h_str = h_str.lower()
+                # 6. Normalizar NFKD (eliminar tildes)
+                try:
+                    nfkd = unicodedata.normalize('NFKD', h_str)
+                    h_str = "".join(c for c in nfkd if not unicodedata.combining(c))
+                except Exception:
+                    pass  # Si falla, mantener el string original
+                # 7. Eliminar guiones bajos múltiples y limpiar extremos
+                h_str = re.sub(r'_+', '_', h_str)
+                h_str = h_str.strip('_')
+                # 8. Si quedó vacío, asignar genérico
+                if not h_str:
+                    base_name = f"columna_{len(cleaned)}"
+                else:
+                    base_name = h_str
+
+            # 9. 🔥 GARANTIZAR UNICIDAD (evitar colisiones)
+            final_name = base_name
+            counter = 1
+            while final_name in cleaned:
+                final_name = f"{base_name}_{counter}"
+                counter += 1
+
+            cleaned.append(final_name)
+
+        return cleaned
 
 
 # ============================================================
@@ -359,7 +379,11 @@ class ExcelImporter:
             tmp_path.unlink(missing_ok=True)
 
     def import_from_path(self, filepath: Path, filename: Optional[str] = None) -> ImportResult:
-        """Importa un archivo Excel desde una ruta y retorna ImportResult."""
+        """
+        Importa un archivo Excel desde una ruta y retorna ImportResult.
+        🔥 Incluye la inyección del título huérfano (last_title) para que el
+        PipelineProcessor pueda heredar la categoría.
+        """
         if filename is None:
             filename = filepath.name
 
@@ -377,29 +401,28 @@ class ExcelImporter:
                     ))
                     continue
 
-                # Detectar header
+                # 1. Detectar header usando el método blindado
                 header_row = Importer._detect_header_row(df_raw)
                 if header_row is None:
                     header_row = 0
 
-                # 🔥 RESCATE DEL TÍTULO (Memoria a corto plazo de la columna 0)
+                # 2. 🔥 RESCATE DEL TÍTULO (último valor no vacío en columna 0 antes del header)
                 last_title = None
-                if header_row > 0:
-                    for idx in range(header_row):
-                        val = df_raw.iloc[idx, 0]
-                        if pd.notna(val) and str(val).strip() and str(val).lower() != 'nan':
-                            last_title = str(val).strip()
+                for idx in range(header_row):
+                    val = df_raw.iloc[idx, 0]
+                    if pd.notna(val) and str(val).strip():
+                        last_title = str(val).strip()
 
-                # Extraer datos
+                # 3. Extraer encabezados y datos
                 headers = df_raw.iloc[header_row].astype(str).str.strip().tolist()
                 data_rows = df_raw.iloc[header_row + 1:].copy()
                 data_rows.columns = headers
 
-                # Limpiar nombres
+                # 4. Limpiar nombres de columnas (con protección de unicidad)
                 clean_headers = Importer._clean_column_names(headers)
                 data_rows.columns = clean_headers
 
-                # Eliminar filas vacías
+                # 5. Eliminar filas completamente vacías
                 data_rows = data_rows.dropna(how='all')
                 if data_rows.empty:
                     result.failed_sheets.append(SheetImportResult(
@@ -409,13 +432,20 @@ class ExcelImporter:
                     ))
                     continue
 
-                # 🔥 INYECCIÓN SEGURA DEL TÍTULO HUÉRFANO (Sin Diccionarios)
+                # 6. 🔥 INYECCIÓN DEL TÍTULO HUÉRFANO COMO PRIMERA FILA
                 if last_title:
-                    new_row_df = pd.DataFrame(np.nan, index=[0], columns=data_rows.columns)
-                    new_row_df.iloc[0, 0] = last_title
-                    data_rows = pd.concat([new_row_df, data_rows], ignore_index=True)
+                    # Crear una fila con el título en la primera columna y NaN en el resto
+                    new_row = {col: np.nan for col in data_rows.columns}
+                    # Asegurar que al menos exista la primera columna
+                    if data_rows.columns[0] in new_row:
+                        new_row[data_rows.columns[0]] = last_title
+                    else:
+                        # Si no hay columnas, crear una
+                        new_row = {data_rows.columns[0]: last_title}
+                    new_df = pd.DataFrame([new_row])
+                    data_rows = pd.concat([new_df, data_rows], ignore_index=True)
 
-                # Añadir hoja de origen
+                # 7. Añadir columna con el nombre de la hoja
                 data_rows['hoja_origen'] = sheet_name
 
                 result.successful_sheets.append(SheetImportResult(
