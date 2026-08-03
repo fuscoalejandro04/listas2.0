@@ -1,7 +1,6 @@
-""" Módulo de Enriquecimiento Semántico con IA (LLM) - Optimizado por
-Deduplicación. Razona sobre los valores únicos de 'categoria' para inferir:
-  - Categoría real (corregida semánticamente)
-  - Línea/Calidad del producto (Classic, Professional, Expert, etc.)
+"""
+Módulo de Enriquecimiento Semántico con IA (LLM) - Gemini 2.5 Flash.
+Optimizado por deduplicación sobre valores únicos de 'categoria'.
 """
 import json
 import os
@@ -12,13 +11,13 @@ from google.genai import types
 class AIEnricher:
     """ 
     Enriquece productos normalizados usando Gemini Flash, 
-    leyendo las credenciales de forma segura desde Streamlit Secrets. 
+    leyendo credenciales desde st.secrets de Streamlit o variables de entorno. 
     """
     
     def __init__(self):
         api_key = None
         
-        # 1. Intentar leer desde los secretos de Streamlit (Entorno Cloud)
+        # 1. Intentar leer desde los secretos de Streamlit Cloud
         try:
             import streamlit as st
             if "GEMINI_API_KEY" in st.secrets:
@@ -26,12 +25,12 @@ class AIEnricher:
         except Exception:
             pass
             
-        # 2. Alternativa local por si las moscas
+        # 2. Alternativa local por variables de entorno
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
             
         if not api_key:
-            raise ValueError("❌ No se encontró la GEMINI_API_KEY en st.secrets.")
+            raise ValueError("❌ No se encontró la GEMINI_API_KEY en st.secrets ni en las variables de entorno.")
 
         self.client = genai.Client(api_key=api_key)
 
