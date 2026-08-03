@@ -40,22 +40,28 @@ class PipelineProcessor:
         # Aplicamos el diccionario para renombrar las columnas del DataFrame
         mapped_df = df.rename(columns=mapping_dict)
         
-        # 3. Normalización básica
-        # Respetamos que DataNormalizer está diseñado para procesar fila por fila
+        # 3. Normalización básica (COMPLETAMENTE ADAPTATIVA)
+        import inspect
+        
         if hasattr(self.normalizer, 'normalize_dataframe'):
             normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
         elif hasattr(self.normalizer, 'normalize_row'):
-            # Aplica la normalización iterando cada fila
-            normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row, context), axis=1)
+            # Revisamos cuántos argumentos espera realmente tu método
+            sig = inspect.signature(self.normalizer.normalize_row)
+            if len(sig.parameters) > 1: # Espera row y context
+                normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row, context), axis=1)
+            else: # Solo espera row
+                normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row), axis=1)
         else:
             # Alternativa de emergencia
             metodos = [m for m in dir(self.normalizer) if not m.startswith('_')]
             if metodos:
                 metodo_principal = getattr(self.normalizer, metodos[0])
-                try:
-                    normalized_df = metodo_principal(mapped_df, context)
-                except TypeError:
+                sig = inspect.signature(metodo_principal)
+                if len(sig.parameters) > 1:
                     normalized_df = mapped_df.apply(lambda row: metodo_principal(row, context), axis=1)
+                else:
+                    normalized_df = mapped_df.apply(lambda row: metodo_principal(row), axis=1)
             else:
                 normalized_df = mapped_df.copy()
         
