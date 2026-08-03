@@ -17,3 +17,6 @@ rapidfuzz>=3.5.0
 
 # Testing
 pytest>=7.4.0
+
+# Libreria OpenAI
+openai>=1.12.0
