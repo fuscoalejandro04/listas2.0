@@ -1,6 +1,7 @@
-""" Módulo Procesador - Orquesta todo el pipeline ETL. Ya no depende de
-importers, recibe el DataFrame directamente. Integra la consolidación,
-normalización estructural, categorización por reglas y validación. """
+"""
+Módulo Procesador - Orquesta todo el pipeline ETL.
+Integra mapeo, normalización estructural, categorización por reglas, IA y validación.
+"""
 import pandas as pd
 import inspect
 from typing import Dict, List, Any, Tuple, Optional
@@ -21,7 +22,7 @@ class PipelineProcessor:
         self.validator = Validator()
         self.rule_categorizer = RuleCategorizer()
         
-        # Inicializamos el cerebro de IA
+        # Inicializamos la IA
         try:
             self.ai_enricher = AIEnricher()
             self.ai_enabled = True
@@ -35,11 +36,11 @@ class PipelineProcessor:
         if hasattr(ContextDetector, 'detect_currency'):
             context.currency = ContextDetector.detect_currency(df)
             
-        # 2. Mapeo de columnas
+        # 2. Mapeo de columnas (ColumnMapper retorna dict {col_orig: col_taxonomia})
         mapping_dict = self.column_mapper.map_columns(df) 
         mapped_df = df.rename(columns=mapping_dict)
         
-        # 3. Normalización básica (ROBUSTA: Fuerza salida de DataFrame)
+        # 3. Normalización básica
         if hasattr(self.normalizer, 'normalize_dataframe'):
             normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
         else:
@@ -57,12 +58,10 @@ class PipelineProcessor:
                     res = norm_func(row, context) if uses_context else norm_func(row)
                     return res if res is not None else row
                 
-                # result_type='expand' OBLIGA a Pandas a mantener la estructura de tabla (DataFrame)
                 normalized_df = mapped_df.apply(safe_normalize, axis=1, result_type='expand')
             else:
                 normalized_df = mapped_df.copy()
                 
-        # Seguro adicional: Si por alguna extraña razón sigue siendo una Series, la forzamos a DataFrame
         if isinstance(normalized_df, pd.Series):
             normalized_df = pd.DataFrame(normalized_df.tolist(), index=mapped_df.index)
         
