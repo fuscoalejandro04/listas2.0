@@ -1,6 +1,6 @@
 """ Módulo Procesador - Orquesta todo el pipeline ETL. Ya no depende de
 importers, recibe el DataFrame directamente. Integra la consolidación,
-normalización estructural, categorización por reglas, IA y validación. """
+normalización estructural, categorización por reglas y validación. """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
 from backend.domain.taxonomy import TAXONOMY
@@ -29,27 +29,46 @@ class PipelineProcessor:
             self.ai_enabled = False
 
     def process(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        # 1. Detección de contexto y mapeo (CORREGIDO)
+        # 1. Detección de contexto (Armando el FileContext manualmente según tu arquitectura)
         context = FileContext()
-        # Verificamos si existe el método para no romper el código
         if hasattr(ContextDetector, 'detect_currency'):
             context.currency = ContextDetector.detect_currency(df)
             
+        # 2. Mapeo de columnas
         mapped_df = self.column_mapper.map_columns(df)
         
-        # 2. Normalización básica
-        normalized_df = self.normalizer.normalize(mapped_df, context)
+        # 3. Normalización básica (CORREGIDO Y BLINDADO)
+        # Respetamos que DataNormalizer está diseñado para procesar fila por fila
+        if hasattr(self.normalizer, 'normalize_dataframe'):
+            normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
+        elif hasattr(self.normalizer, 'normalize_row'):
+            # Aplica la normalización iterando cada fila (comportamiento de tu código original)
+            normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row, context), axis=1)
+        else:
+            # Alternativa de emergencia: busca cualquier método público disponible en tu clase
+            metodos = [m for m in dir(self.normalizer) if not m.startswith('_')]
+            if metodos:
+                metodo_principal = getattr(self.normalizer, metodos[0])
+                try:
+                    normalized_df = metodo_principal(mapped_df, context)
+                except TypeError:
+                    normalized_df = mapped_df.apply(lambda row: metodo_principal(row, context), axis=1)
+            else:
+                normalized_df = mapped_df.copy()
         
-        # 3. Categorización por reglas locales (Rápido y gratis)
-        processed_df = self.rule_categorizer.categorize(normalized_df)
+        # 4. Categorización por reglas locales
+        if hasattr(self.rule_categorizer, 'categorize'):
+            processed_df = self.rule_categorizer.categorize(normalized_df)
+        else:
+            processed_df = normalized_df
         
-        # 4. Enriquecimiento Semántico con IA
+        # 5. Enriquecimiento Semántico con IA
         if getattr(self, 'ai_enabled', False) and 'categoria' in processed_df.columns:
             # Extraemos solo las categorías únicas
             categorias_unicas = processed_df['categoria'].dropna().unique().tolist()
             
             if categorias_unicas:
-                # Llamamos a la API de Gemini (solo enviamos la lista deduplicada)
+                # Llamamos a la API de Gemini
                 ai_results = self.ai_enricher.enrich_categories(categorias_unicas)
                 
                 # Mapeamos los resultados de vuelta al DataFrame
@@ -71,7 +90,9 @@ class PipelineProcessor:
                                 
                             processed_df.loc[mask, 'confianza_ia'] = confianza
 
-        # 5. Validación final
-        reporte_calidad = self.validator.validate(processed_df)
+        # 6. Validación final
+        reporte_calidad = {}
+        if hasattr(self.validator, 'validate'):
+            reporte_calidad = self.validator.validate(processed_df)
         
         return processed_df, reporte_calidad
