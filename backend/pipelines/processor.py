@@ -2,6 +2,7 @@
 importers, recibe el DataFrame directamente. Integra la consolidación,
 normalización estructural, categorización por reglas y validación. """
 import pandas as pd
+import inspect
 from typing import Dict, List, Any, Tuple, Optional
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
@@ -34,53 +35,52 @@ class PipelineProcessor:
         if hasattr(ContextDetector, 'detect_currency'):
             context.currency = ContextDetector.detect_currency(df)
             
-        # 2. Mapeo de columnas (CORREGIDO)
-        # map_columns devuelve un dict {nombre_viejo: nombre_nuevo}
+        # 2. Mapeo de columnas
         mapping_dict = self.column_mapper.map_columns(df) 
-        # Aplicamos el diccionario para renombrar las columnas del DataFrame
         mapped_df = df.rename(columns=mapping_dict)
         
-        # 3. Normalización básica (COMPLETAMENTE ADAPTATIVA)
-        import inspect
-        
+        # 3. Normalización básica (ROBUSTA: Fuerza salida de DataFrame)
         if hasattr(self.normalizer, 'normalize_dataframe'):
             normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
-        elif hasattr(self.normalizer, 'normalize_row'):
-            # Revisamos cuántos argumentos espera realmente tu método
-            sig = inspect.signature(self.normalizer.normalize_row)
-            if len(sig.parameters) > 1: # Espera row y context
-                normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row, context), axis=1)
-            else: # Solo espera row
-                normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row), axis=1)
         else:
-            # Alternativa de emergencia
-            metodos = [m for m in dir(self.normalizer) if not m.startswith('_')]
-            if metodos:
-                metodo_principal = getattr(self.normalizer, metodos[0])
-                sig = inspect.signature(metodo_principal)
-                if len(sig.parameters) > 1:
-                    normalized_df = mapped_df.apply(lambda row: metodo_principal(row, context), axis=1)
-                else:
-                    normalized_df = mapped_df.apply(lambda row: metodo_principal(row), axis=1)
+            norm_func = getattr(self.normalizer, 'normalize_row', None)
+            if not norm_func:
+                metodos = [m for m in dir(self.normalizer) if not m.startswith('_')]
+                if metodos:
+                    norm_func = getattr(self.normalizer, metodos[0])
+            
+            if norm_func:
+                sig = inspect.signature(norm_func)
+                uses_context = len(sig.parameters) > 1
+                
+                def safe_normalize(row):
+                    res = norm_func(row, context) if uses_context else norm_func(row)
+                    return res if res is not None else row
+                
+                # result_type='expand' OBLIGA a Pandas a mantener la estructura de tabla (DataFrame)
+                normalized_df = mapped_df.apply(safe_normalize, axis=1, result_type='expand')
             else:
                 normalized_df = mapped_df.copy()
+                
+        # Seguro adicional: Si por alguna extraña razón sigue siendo una Series, la forzamos a DataFrame
+        if isinstance(normalized_df, pd.Series):
+            normalized_df = pd.DataFrame(normalized_df.tolist(), index=mapped_df.index)
         
         # 4. Categorización por reglas locales
         if hasattr(self.rule_categorizer, 'categorize'):
             processed_df = self.rule_categorizer.categorize(normalized_df)
+            if isinstance(processed_df, pd.Series):
+                processed_df = pd.DataFrame(processed_df.tolist(), index=normalized_df.index)
         else:
-            processed_df = normalized_df
+            processed_df = normalized_df.copy()
         
         # 5. Enriquecimiento Semántico con IA
         if getattr(self, 'ai_enabled', False) and 'categoria' in processed_df.columns:
-            # Extraemos solo las categorías únicas
             categorias_unicas = processed_df['categoria'].dropna().unique().tolist()
             
             if categorias_unicas:
-                # Llamamos a la API de Gemini
                 ai_results = self.ai_enricher.enrich_categories(categorias_unicas)
                 
-                # Mapeamos los resultados de vuelta al DataFrame
                 if ai_results:
                     for original_cat, inferencia in ai_results.items():
                         mask = processed_df['categoria'] == original_cat
