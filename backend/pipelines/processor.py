@@ -29,8 +29,12 @@ class PipelineProcessor:
             self.ai_enabled = False
 
     def process(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        # 1. Detección de contexto y mapeo
-        context = ContextDetector().detect_context(df)
+        # 1. Detección de contexto y mapeo (CORREGIDO)
+        context = FileContext()
+        # Verificamos si existe el método para no romper el código
+        if hasattr(ContextDetector, 'detect_currency'):
+            context.currency = ContextDetector.detect_currency(df)
+            
         mapped_df = self.column_mapper.map_columns(df)
         
         # 2. Normalización básica
@@ -40,7 +44,7 @@ class PipelineProcessor:
         processed_df = self.rule_categorizer.categorize(normalized_df)
         
         # 4. Enriquecimiento Semántico con IA
-        if self.ai_enabled and 'categoria' in processed_df.columns:
+        if getattr(self, 'ai_enabled', False) and 'categoria' in processed_df.columns:
             # Extraemos solo las categorías únicas
             categorias_unicas = processed_df['categoria'].dropna().unique().tolist()
             
