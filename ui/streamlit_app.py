@@ -127,7 +127,7 @@ with tab1:
                     # 2. PIPELINE ETL (DETECCIÓN, NORMALIZACIÓN, VALIDACIÓN)
                     # =================================================
                     # 🔥 Cambio: confidence_threshold subido a 0.80 para evitar mapeos peligrosos
-                    processor = PipelineProcessor(confidence_threshold=0.80)
+                    processor = PipelineProcessor()
                     process_result = processor.process(df_raw)
                     
                     # Resumen ejecutivo
