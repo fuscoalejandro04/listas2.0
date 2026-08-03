@@ -29,23 +29,26 @@ class PipelineProcessor:
             self.ai_enabled = False
 
     def process(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        # 1. Detección de contexto (Armando el FileContext manualmente según tu arquitectura)
+        # 1. Detección de contexto
         context = FileContext()
         if hasattr(ContextDetector, 'detect_currency'):
             context.currency = ContextDetector.detect_currency(df)
             
-        # 2. Mapeo de columnas
-        mapped_df = self.column_mapper.map_columns(df)
+        # 2. Mapeo de columnas (CORREGIDO)
+        # map_columns devuelve un dict {nombre_viejo: nombre_nuevo}
+        mapping_dict = self.column_mapper.map_columns(df) 
+        # Aplicamos el diccionario para renombrar las columnas del DataFrame
+        mapped_df = df.rename(columns=mapping_dict)
         
-        # 3. Normalización básica (CORREGIDO Y BLINDADO)
+        # 3. Normalización básica
         # Respetamos que DataNormalizer está diseñado para procesar fila por fila
         if hasattr(self.normalizer, 'normalize_dataframe'):
             normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
         elif hasattr(self.normalizer, 'normalize_row'):
-            # Aplica la normalización iterando cada fila (comportamiento de tu código original)
+            # Aplica la normalización iterando cada fila
             normalized_df = mapped_df.apply(lambda row: self.normalizer.normalize_row(row, context), axis=1)
         else:
-            # Alternativa de emergencia: busca cualquier método público disponible en tu clase
+            # Alternativa de emergencia
             metodos = [m for m in dir(self.normalizer) if not m.startswith('_')]
             if metodos:
                 metodo_principal = getattr(self.normalizer, metodos[0])
@@ -84,7 +87,6 @@ class PipelineProcessor:
                             if cat_razonada:
                                 processed_df.loc[mask, 'categoria_razonada'] = cat_razonada
                                 
-                            # Solo pisamos la línea si la IA encontró una
                             if linea_prod:
                                 processed_df.loc[mask, 'linea_producto'] = linea_prod
                                 
