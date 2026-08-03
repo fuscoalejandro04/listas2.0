@@ -1,218 +1,73 @@
-"""
-Módulo Procesador - Orquesta todo el pipeline ETL.
-Ya no depende de importers, recibe el DataFrame directamente.
-Integra la consolidación, normalización estructural, categorización por reglas y validación.
-"""
+""" Módulo Procesador - Orquesta todo el pipeline ETL. Ya no depende de
+importers, recibe el DataFrame directamente. Integra la consolidación,
+normalización estructural, categorización por reglas, IA y validación. """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
-
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
 from backend.pipelines.normalizers import DataNormalizer
 from backend.pipelines.validators import Validator
 from backend.pipelines.context_detector import ContextDetector, FileContext
 from backend.pipelines.rule_categorizer import RuleCategorizer
-
+from backend.pipelines.ai_enricher import AIEnricher 
 
 class PipelineProcessor:
     """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
-
-    def __init__(self, 
-                 confidence_threshold: float = 0.8,
-                 enable_categorizer: bool = True):
-        self.mapper = ColumnMapper(confidence_threshold)
+    
+    def __init__(self):
+        self.column_mapper = ColumnMapper()
         self.normalizer = DataNormalizer()
         self.validator = Validator()
-        self.enable_categorizer = enable_categorizer
-        if self.enable_categorizer:
-            self.categorizer = RuleCategorizer()
+        self.rule_categorizer = RuleCategorizer()
+        
+        # Inicializamos el cerebro de IA
+        try:
+            self.ai_enricher = AIEnricher()
+            self.ai_enabled = True
+        except Exception as e:
+            print(f"⚠️ IA deshabilitada: {e}")
+            self.ai_enabled = False
 
-    def _inferir_categorias_de_titulos(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        🔥 MODIFICADO: Detecta filas que son títulos de categoría (más del 80% de celdas vacías
-        pero con texto en las primeras columnas), propaga la categoría hacia abajo
-        mediante forward fill, y luego ELIMINA las filas de título para que no sean
-        procesadas como productos.
-        """
-        if df.empty:
-            return df
+    def process(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        # 1. Detección de contexto y mapeo
+        context = ContextDetector().detect_context(df)
+        mapped_df = self.column_mapper.map_columns(df)
         
-        # Crear columna vacía para la categoría heredada
-        df['categoria_heredada'] = None
+        # 2. Normalización básica
+        normalized_df = self.normalizer.normalize(mapped_df, context)
         
-        # Identificar índices de filas que son títulos
-        titulos_indices = []
-        total_cols = df.shape[1]
-        threshold = 0.8  # 80% de celdas vacías
+        # 3. Categorización por reglas locales (Rápido y gratis)
+        processed_df = self.rule_categorizer.categorize(normalized_df)
         
-        for idx in range(len(df)):
-            row = df.iloc[idx]
-            non_empty = row.count()
-            empty_ratio = 1 - (non_empty / total_cols)
+        # 4. Enriquecimiento Semántico con IA
+        if self.ai_enabled and 'categoria' in processed_df.columns:
+            # Extraemos solo las categorías únicas
+            categorias_unicas = processed_df['categoria'].dropna().unique().tolist()
             
-            if empty_ratio >= threshold:
-                # Buscar texto en las primeras columnas
-                titulo = None
-                for col in range(min(3, total_cols)):
-                    val = row.iloc[col]
-                    if pd.notna(val) and str(val).strip():
-                        titulo = str(val).strip()
-                        break
+            if categorias_unicas:
+                # Llamamos a la API de Gemini (solo enviamos la lista deduplicada)
+                ai_results = self.ai_enricher.enrich_categories(categorias_unicas)
                 
-                if titulo:
-                    df.at[idx, 'categoria_heredada'] = titulo
-                    titulos_indices.append(idx)
+                # Mapeamos los resultados de vuelta al DataFrame
+                if ai_results:
+                    for original_cat, inferencia in ai_results.items():
+                        mask = processed_df['categoria'] == original_cat
+                        
+                        if isinstance(inferencia, dict):
+                            cat_razonada = inferencia.get('categoria_razonada')
+                            linea_prod = inferencia.get('linea_producto')
+                            confianza = inferencia.get('confianza', 0.0)
+
+                            if cat_razonada:
+                                processed_df.loc[mask, 'categoria_razonada'] = cat_razonada
+                                
+                            # Solo pisamos la línea si la IA encontró una
+                            if linea_prod:
+                                processed_df.loc[mask, 'linea_producto'] = linea_prod
+                                
+                            processed_df.loc[mask, 'confianza_ia'] = confianza
+
+        # 5. Validación final
+        reporte_calidad = self.validator.validate(processed_df)
         
-        # Aplicar forward fill para propagar la categoría hacia las filas siguientes
-        df['categoria_heredada'] = df['categoria_heredada'].ffill()
-        
-        # 🔥 ELIMINAR LAS FILAS DE TÍTULO (para que no sean procesadas como productos)
-        if titulos_indices:
-            df = df.drop(index=titulos_indices).reset_index(drop=True)
-        
-        return df
-
-    def normalize_and_consolidate(
-        self, df: pd.DataFrame, mapping: Dict[str, Tuple[Optional[str], float]]
-    ) -> pd.DataFrame:
-        """
-        Renombra columnas según taxonomía, filtra las no mapeadas y consolida duplicados
-        dando prioridad a la columna original con mayor índice de confianza.
-        """
-        groups = {}
-        for orig_col, (field, conf) in mapping.items():
-            if orig_col not in df.columns:
-                continue
-            if not field or field in (None, 'No detectado', ''):
-                continue
-            groups.setdefault(field, []).append((conf, orig_col))
-
-        df_result = pd.DataFrame(index=df.index)
-
-        for field, cols_with_conf in groups.items():
-            # Ordenar por confianza descendente para priorizar la mejor columna
-            cols_sorted = [
-                col for _, col in sorted(cols_with_conf, key=lambda x: x[0], reverse=True)
-            ]
-
-            if len(cols_sorted) == 1:
-                df_result[field] = df[cols_sorted[0]]
-            else:
-                # Coalesce: bfill a lo largo de las columnas, luego tomar la primera
-                combined = pd.concat([df[col] for col in cols_sorted], axis=1)
-                df_result[field] = combined.bfill(axis=1).iloc[:, 0]
-
-        return df_result
-
-    def process(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Ejecuta todo el pipeline y retorna un resultado estructurado.
-        """
-        # 0. Prevenir AttributeError: 'int' object has no attribute 'strip'
-        df.columns = df.columns.astype(str)
-
-        # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (Y ELIMINAR FILAS DE TÍTULO)
-        df = self._inferir_categorias_de_titulos(df)
-
-        # 🔥 0.5 Detectar contexto global (moneda y unidad por defecto)
-        context = FileContext()
-        context.currency = ContextDetector.detect_currency(df)
-        context.default_unit = ContextDetector.detect_unit(df)
-        # Inyectar el contexto en el normalizador
-        self.normalizer.context = context
-        self.normalizer.default_unit = context.default_unit
-
-        # 1. Detección de columnas
-        mapping = self.mapper.map_columns(df)
-        confidence_report = self.mapper.get_confidence_report(mapping)
-
-        # 🔥 FORZAR QUE 'categoria_heredada' sea mapeada con confianza máxima
-        if 'categoria_heredada' in df.columns:
-            # Sobrescribir el mapeo para esta columna
-            mapping['categoria_heredada'] = ('categoria', 1.0)
-
-        # 1.5 Normalización Estructural y Consolidación (Elimina tuplas duplicadas)
-        df_clean = self.normalize_and_consolidate(df, mapping)
-
-        # ------------------------------------------------------------
-        # FILTROS DE LIMPIEZA DE FILAS BASURA
-        # ------------------------------------------------------------
-
-        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
-        if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
-            mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
-            mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
-            df_clean = df_clean[~(mask_codigo & mask_desc)]
-        elif 'codigo' in df_clean.columns:
-            mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
-            df_clean = df_clean[~mask_codigo]
-
-        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
-        if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
-            mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
-            mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
-            df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
-
-        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
-        if 'codigo' in df_clean.columns:
-            codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
-            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
-            df_clean = df_clean[~mascara_encabezado]
-
-        # 2. Normalización de Datos (síntesis de atributos)
-        normalized_products = []
-        for _, row in df_clean.iterrows():
-            normalized = self.normalizer.normalize_row(row)
-            normalized_products.append(normalized)
-
-        # 🔥 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
-        if self.enable_categorizer and self.categorizer:
-            normalized_products = self.categorizer.enrich(normalized_products)
-
-        # 3. Validación
-        validation_report = self.validator.validate_all(normalized_products)
-
-        # 4. Detectar duplicados (básico por código)
-        duplicates = self.find_duplicates(normalized_products)
-
-        return {
-            'mapping': mapping,
-            'confidence_report': confidence_report,
-            'products': normalized_products,
-            'validation_report': validation_report,
-            'duplicates': duplicates,
-            'summary': self.generate_summary(
-                normalized_products, validation_report, duplicates
-            ),
-        }
-
-    @staticmethod
-    def find_duplicates(products: List[Dict]) -> List[Dict]:
-        """Detecta productos con mismo código."""
-        seen = {}
-        duplicate_rows = []
-        for idx, p in enumerate(products):
-            code = p.get('codigo', '')
-            if not code:
-                continue
-            if code in seen:
-                duplicate_rows.append({
-                    'row': idx + 1,
-                    'code': code,
-                    'previous_row': seen[code]
-                })
-            else:
-                seen[code] = idx + 1
-        return duplicate_rows
-
-    @staticmethod
-    def generate_summary(products: List[Dict], validation: Dict, duplicates: List) -> Dict:
-        """Genera un resumen ejecutivo del procesamiento."""
-        return {
-            'total_rows': len(products),
-            'valid_rows': validation['total_products'] - validation['error_count'],
-            'error_rows': validation['error_count'],
-            'warning_rows': validation['warning_count'],
-            'duplicate_count': len(duplicates),
-            'quality_score': validation['quality_score']
-        }
+        return processed_df, reporte_calidad
