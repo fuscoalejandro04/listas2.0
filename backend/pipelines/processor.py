@@ -13,7 +13,6 @@ from backend.pipelines.context_detector import ContextDetector, FileContext
 from backend.pipelines.rule_categorizer import RuleCategorizer
 from backend.pipelines.ai_enricher import AIEnricher
 
-
 class PipelineProcessor:
     """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
 
@@ -33,30 +32,29 @@ class PipelineProcessor:
         self.validator = Validator()
         self.enable_categorizer = enable_categorizer
         self.enable_ai = enable_ai
-        print(f"   enable_ai = {self.enable_ai}")
+        print(f"🔧 enable_ai = {self.enable_ai}")
 
         if self.enable_categorizer:
             self.categorizer = RuleCategorizer()
-            print("   ✅ RuleCategorizer inicializado")
+            print("✅ RuleCategorizer inicializado")
         else:
             self.categorizer = None
 
         # Inicializar IA (si está habilitada)
         self.ai_enricher = None
         if self.enable_ai:
-            print("   🤖 Inicializando AIEnricher...")
+            print("🧠 Inicializando AIEnricher...")
             try:
-                self.ai_enricher = AIEnricher()
-                # Si no tiene API key, internamente se pone en modo simulación.
-                print(f"   ✅ AIEnricher inicializado (simulate={self.ai_enricher.simulate})")
+                self.ai_enricher = AIEnricher()  # Si no tiene API key, internamente se pone en modo simulación.
+                print(f"✅ AIEnricher inicializado (simulate={self.ai_enricher.simulate})")
             except Exception as e:
-                print(f"   ❌ Error al inicializar AIEnricher: {e}")
+                print(f"❌ Error al inicializar AIEnricher: {e}")
                 self.ai_enricher = None
         print("✅ PipelineProcessor listo.\n")
 
     def _inferir_categorias_de_titulos(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        🔥 Detecta filas que son títulos de categoría (≥80% celdas vacías),
+        Detecta filas que son títulos de categoría (≥80% celdas vacías),
         propaga la categoría hacia abajo con forward fill, y luego ELIMINA
         las filas de título para que no sean procesadas como productos.
         """
@@ -107,7 +105,6 @@ class PipelineProcessor:
             groups.setdefault(field, []).append((conf, orig_col))
 
         df_result = pd.DataFrame(index=df.index)
-
         for field, cols_with_conf in groups.items():
             cols_sorted = [
                 col for _, col in sorted(cols_with_conf, key=lambda x: x[0], reverse=True)
@@ -130,14 +127,15 @@ class PipelineProcessor:
         - duplicates: productos con código duplicado
         - summary: métricas resumidas
         """
-        print("📥 Iniciando process() con DataFrame de shape:", df.shape)
+        print(f"📥 Iniciando process() con DataFrame de shape: {df.shape}")
+
         # 0. Prevenir AttributeError con columnas
         df.columns = df.columns.astype(str)
 
         # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (Y ELIMINAR FILAS DE TÍTULO)
-        print("🔍 Inferiendo categorías desde títulos...")
+        print("🔄 Infiriendo categorías desde títulos...")
         df = self._inferir_categorias_de_titulos(df)
-        print(f"   DataFrame después de inferir títulos: {df.shape}")
+        print(f"📊 DataFrame después de inferir títulos: {df.shape}")
 
         # 🔥 DETECTAR CONTEXTO GLOBAL (moneda y unidad por defecto)
         context = FileContext()
@@ -148,7 +146,7 @@ class PipelineProcessor:
         print(f"💱 Contexto: moneda={context.currency}, unidad={context.default_unit}")
 
         # 1. MAPEO DE COLUMNAS
-        print("🗺️ Mapeando columnas...")
+        print("🔍 Mapeando columnas...")
         mapping = self.mapper.map_columns(df)
         confidence_report = self.mapper.get_confidence_report(mapping)
 
@@ -157,13 +155,13 @@ class PipelineProcessor:
             mapping['categoria_heredada'] = ('categoria', 1.0)
 
         # 1.5 CONSOLIDACIÓN (elimina columnas duplicadas)
-        print("🔗 Consolidando columnas...")
+        print("🧩 Consolidando columnas...")
         df_clean = self.normalize_and_consolidate(df, mapping)
 
         # ------------------------------------------------------------
         # FILTROS DE LIMPIEZA DE FILAS BASURA
         # ------------------------------------------------------------
-        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacíos
+        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacios
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -172,44 +170,44 @@ class PipelineProcessor:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             df_clean = df_clean[~mask_codigo]
 
-        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacíos
+        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacios
         if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
             mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
             df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
 
-        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CODIGO" o "CÓD"
+        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CÓDIGO" o "COD"
         if 'codigo' in df_clean.columns:
             codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
-            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
+            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'COD'])
             df_clean = df_clean[~mascara_encabezado]
 
         print(f"🧹 DataFrame después de limpieza: {df_clean.shape}")
 
         # 2. NORMALIZACIÓN DE DATOS (síntesis de atributos)
-        print("🔄 Normalizando datos...")
+        print("🛠️ Normalizando datos...")
         normalized_products = []
         for _, row in df_clean.iterrows():
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
-        print(f"   {len(normalized_products)} productos normalizados")
+        print(f"📦 {len(normalized_products)} productos normalizados")
 
-        # 🔥 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
+        # 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
         if self.enable_categorizer and self.categorizer:
             print("📋 Aplicando categorización por reglas...")
             normalized_products = self.categorizer.enrich(normalized_products)
-            print(f"   {len(normalized_products)} productos después de reglas")
+            print(f"📋 {len(normalized_products)} productos después de reglas")
 
-        # 🔥 2.6 ENRIQUECIMIENTO SEMÁNTICO CON IA (Gemini)
+        # 2.6 ENRIQUECIMIENTO SEMÁNTICO CON IA (Gemini)
+        # Se ejecuta sobre las categorías ya normalizadas y regladas
         print(f"🧠 Verificando IA: enable_ai={self.enable_ai}, ai_enricher={self.ai_enricher is not None}")
         if self.enable_ai and self.ai_enricher:
-            print("🤖 Aplicando enriquecimiento con IA...")
+            print("🧠 Aplicando enriquecimiento con IA...")
             try:
-                # Guardar número de productos antes para comparar
                 before = len(normalized_products)
                 normalized_products = self.ai_enricher.enrich(normalized_products)
                 after = len(normalized_products)
-                print(f"   Productos después de IA: {after} (cambiaron: {before != after})")
+                print(f"✅ Productos después de IA: {after} (cambiaron: {before != after})")
             except Exception as e:
                 print(f"❌ Error en enriquecimiento IA: {e}")
                 import traceback
@@ -218,7 +216,7 @@ class PipelineProcessor:
             print("⚠️ IA deshabilitada o no inicializada. Saltando enriquecimiento.")
 
         # 3. VALIDACIÓN
-        print("🔍 Validando productos...")
+        print("✅ Validando productos...")
         validation_report = self.validator.validate_all(normalized_products)
 
         # 4. DETECTAR DUPLICADOS (básico por código)
@@ -227,7 +225,7 @@ class PipelineProcessor:
         # 5. GENERAR RESUMEN EJECUTIVO
         summary = self.generate_summary(normalized_products, validation_report, duplicates)
 
-        print("✅ Procesamiento completado.\n")
+        print("🏁 Procesamiento completado.\n")
         return {
             'mapping': mapping,
             'confidence_report': confidence_report,
