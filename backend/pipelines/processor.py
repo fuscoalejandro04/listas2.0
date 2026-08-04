@@ -42,8 +42,10 @@ class PipelineProcessor:
         self.ai_enricher = None
         if self.enable_ai:
             try:
+                print("🧠 Inicializando AIEnricher...")
                 self.ai_enricher = AIEnricher()
                 # Si no tiene API key, internamente se pone en modo simulación.
+                print(f"🧠 AIEnricher inicializado (simulate={self.ai_enricher.simulate})")
             except Exception as e:
                 print(f"⚠️ IA no disponible: {e}")
                 self.ai_enricher = None
@@ -180,15 +182,20 @@ class PipelineProcessor:
 
         # 🔥 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
         if self.enable_categorizer and self.categorizer:
+            print("📋 Aplicando categorización por reglas...")
             normalized_products = self.categorizer.enrich(normalized_products)
 
         # 🔥 2.6 ENRIQUECIMIENTO SEMÁNTICO CON IA (Gemini)
         # Se ejecuta sobre las categorías ya normalizadas y regladas
         if self.enable_ai and self.ai_enricher:
+            print(f"🧠 IA: enable_ai={self.enable_ai}, ai_enricher={self.ai_enricher is not None}")
             try:
                 normalized_products = self.ai_enricher.enrich(normalized_products)
+                print("✅ Enriquecimiento IA completado")
             except Exception as e:
                 print(f"⚠️ Error en enriquecimiento IA: {e}")
+        else:
+            print("⏭️ Enriquecimiento IA saltado (deshabilitado o sin enricher)")
 
         # 3. VALIDACIÓN
         validation_report = self.validator.validate_all(normalized_products)
