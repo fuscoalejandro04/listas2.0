@@ -130,10 +130,11 @@ with tab1:
                     # =================================================
                     # 2. PIPELINE ETL
                     # =================================================
+                    # 🔥 IMPORTANTE: enable_ai=True para activar Gemini
                     processor = PipelineProcessor(
                         confidence_threshold=0.80,
                         enable_categorizer=True,
-                        enable_ai=True  # Habilita IA (Gemini) si está configurada
+                        enable_ai=True  # ← ¡ACTIVADO!
                     )
                     process_result = processor.process(df_raw)
 
@@ -193,13 +194,6 @@ with tab1:
                     for col in precio_cols:
                         if col in df_export.columns and df_export[col].dtype in ['float64', 'float32']:
                             df_export[col] = df_export[col].round(2)
-
-                    # 🔥 b) Eliminar columnas de metadata (hoja_origen y confianza_ia) si se desea conservar, dejamos solo confianza_ia
-                    # Pero para no perder información, mantenemos confianza_ia y hoja_origen puede ser útil.
-                    # Por claridad, dejamos hoja_origen y confianza_ia, pero el usuario puede decidir.
-                    # Si se quiere eliminar, descomentar:
-                    # cols_to_drop = ['hoja_origen']
-                    # df_export = df_export.drop(columns=[col for col in cols_to_drop if col in df_export.columns])
 
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
