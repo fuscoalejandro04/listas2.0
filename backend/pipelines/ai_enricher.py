@@ -41,12 +41,14 @@ class AIEnricher:
                     self.api_key = st.secrets["GEMINI_API_KEY"]
                     print("🔑 Clave API leída desde st.secrets")
             except ImportError:
-                print("ℹ️ No se pudo importar streamlit (modo local o consola)")
+                print("⚠️ No se pudo importar streamlit (no estamos en entorno Streamlit)")
+            except Exception as e:
+                print(f"⚠️ Error al leer st.secrets: {e}")
 
         if not self.api_key:
             self.api_key = os.getenv("GEMINI_API_KEY")
             if self.api_key:
-                print("🔑 Clave API leída desde variable de entorno")
+                print("🔑 Clave API leída desde variable de entorno GEMINI_API_KEY")
 
         # 2. Decidir modo simulación
         self.simulate = simulate or not self.api_key
@@ -68,6 +70,7 @@ class AIEnricher:
                 self.simulate = True
                 self.client = None
 
+        # Log final del estado
         print(f"🔑 AIEnricher: simulate={self.simulate}, api_key={'OK' if self.api_key else 'NO'}")
 
     def enrich(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -76,7 +79,9 @@ class AIEnricher:
         Retorna la misma lista de productos pero con campos actualizados.
         """
         print(f"🧠 AIEnricher.enrich() llamado con {len(products)} productos")
+
         if not products:
+            print("⚠️ No hay productos para enriquecer.")
             return products
 
         # 1. Extraer categorías únicas (ignorando nulos, vacíos y espacios)
@@ -86,18 +91,18 @@ class AIEnricher:
             if cat and isinstance(cat, str) and cat.strip():
                 categoria_set.add(cat.strip())
 
+        print(f"📋 Categorías únicas encontradas: {len(categoria_set)}")
+
         if not categoria_set:
             print("⚠️ No se encontraron categorías para enriquecer.")
             return products
-
-        print(f"📋 Categorías únicas encontradas: {len(categoria_set)}")
 
         # 2. Obtener el mapeo (desde caché o vía IA)
         mapping = self._get_mapping_for_categories(list(categoria_set))
         print(f"📊 Mapping generado para {len(mapping)} categorías")
 
         # 3. Aplicar el mapeo a cada producto
-        productos_modificados = 0
+        productos_actualizados = 0
         for p in products:
             cat_original = p.get('categoria')
             if cat_original and isinstance(cat_original, str):
@@ -107,13 +112,13 @@ class AIEnricher:
                     # Solo sobreescribir si hay un valor válido
                     if enriched.get('categoria_razonada'):
                         p['categoria'] = enriched['categoria_razonada']
+                        productos_actualizados += 1
                     if enriched.get('linea_producto'):
                         p['linea_producto'] = enriched['linea_producto']
                     # Siempre asignar confianza (puede ser 0)
                     p['confianza_ia'] = enriched.get('confianza', 0.0)
-                    productos_modificados += 1
 
-        print(f"✅ Productos enriquecidos: {productos_modificados} de {len(products)}")
+        print(f"✅ Productos actualizados: {productos_actualizados} de {len(products)}")
         return products
 
     def _get_mapping_for_categories(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -130,13 +135,14 @@ class AIEnricher:
 
         # Si no está en caché, procesar
         if self.simulate:
-            print("🔄 Usando simulación (sin llamada a Gemini)")
+            print("🔄 Usando simulación (sin IA)")
             mapping = self._simulate_mapping(categories_sorted)
         else:
-            print("📡 Llamando a Gemini para enriquecer categorías...")
+            print("🤖 Llamando a Gemini para enriquecer categorías...")
             prompt = self._build_prompt(categories_sorted)
             response = self._call_llm(prompt)
             mapping = self._parse_response(response, categories_sorted)
+            print(f"📥 Respuesta de Gemini procesada: {len(mapping)} categorías")
 
         self.cache[cache_key] = mapping
         return mapping
@@ -232,7 +238,7 @@ Ahora, analiza la lista de categorías proporcionada.
                     temperature=self.temperature
                 ),
             )
-            print("📡 Respuesta recibida de Gemini")
+            print("✅ Llamada a Gemini exitosa")
             return response.text
         except Exception as e:
             print(f"❌ Error en llamada a Gemini: {e}. Cambiando a modo simulación.")
@@ -272,7 +278,6 @@ Ahora, analiza la lista de categorías proporcionada.
                             entry["linea_producto"] = None
                         if "confianza" not in entry:
                             entry["confianza"] = 0.0
-            print("✅ Respuesta parseada correctamente")
             return data
         except (json.JSONDecodeError, ValueError) as e:
             print(f"⚠️ Error al parsear respuesta: {e}. Usando simulación.")
