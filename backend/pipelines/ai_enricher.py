@@ -7,7 +7,7 @@ import json
 import hashlib
 import os
 from typing import List, Dict, Any, Optional, Set
-import streamlit as st  # Para mostrar debug en UI
+import streamlit as st
 
 
 class AIEnricher:
@@ -21,16 +21,9 @@ class AIEnricher:
                  model: str = "gemini-2.5-flash",
                  temperature: float = 0.1,
                  simulate: bool = False):
-        """
-        Args:
-            api_key: Clave de API de Google. Si es None, intenta leer de st.secrets o ENV.
-            model: Modelo Gemini (por defecto gemini-2.5-flash).
-            temperature: Temperatura (baja para respuestas deterministas).
-            simulate: Si True, no llama a la API real y devuelve datos simulados.
-        """
         self.model = model
         self.temperature = temperature
-        self.cache: Dict[str, Dict[str, Any]] = {}
+        self.cache: Dict[str, Dict[str, Any]] = {}  # Mantenemos pero no usaremos en esta prueba
 
         # 1. Obtener API key
         self.api_key = api_key
@@ -50,7 +43,6 @@ class AIEnricher:
             if self.api_key:
                 print("🔑 Clave API leída desde variable de entorno GEMINI_API_KEY")
 
-        # 2. Decidir modo simulación
         self.simulate = simulate or not self.api_key
 
         if self.simulate:
@@ -71,56 +63,60 @@ class AIEnricher:
 
         print(f"🔑 AIEnricher: simulate={self.simulate}, api_key={'OK' if self.api_key else 'NO'}")
 
-    def enrich(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Enriquece los productos operando sobre valores únicos de 'categoria'.
-        Retorna la misma lista de productos pero con campos actualizados.
-        """
-        print(f"🧠 AIEnricher.enrich() llamado con {len(products)} productos")
+    def _normalize_category(self, cat: str) -> str:
+        """Normaliza una categoría: mayúsculas, sin espacios extra."""
+        if not cat:
+            return cat
+        return cat.strip().upper()
 
+    def enrich(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        print(f"🧠 AIEnricher.enrich() llamado con {len(products)} productos")
         if not products:
-            print("⚠️ No hay productos para enriquecer.")
             return products
 
-        # 1. Extraer categorías únicas (ignorando nulos, vacíos y espacios)
+        # 1. Extraer categorías únicas normalizadas
         categoria_set: Set[str] = set()
         for p in products:
             cat = p.get('categoria')
             if not cat:
                 cat = p.get('categoría')
             if cat and isinstance(cat, str) and cat.strip():
-                categoria_set.add(cat.strip())
+                categoria_set.add(self._normalize_category(cat))
 
-        print(f"📋 Categorías únicas encontradas: {len(categoria_set)}")
-
+        print(f"📋 Categorías únicas normalizadas: {len(categoria_set)}")
         if not categoria_set:
-            print("⚠️ No se encontraron categorías para enriquecer.")
             return products
 
-        # 2. Obtener el mapeo (desde caché o vía IA)
-        mapping = self._get_mapping_for_categories(list(categoria_set))
+        # 2. Obtener el mapeo (SIN CACHÉ para esta prueba)
+        # Forzamos a que siempre se genere nuevo mapping
+        mapping = self._generate_mapping(list(categoria_set))
         print(f"📊 Mapping generado para {len(mapping)} categorías")
 
-        # ===== DEBUG EN UI =====
+        # Debug
         st.write("🔍 **Debug del mapping:**")
         st.write(f"Claves del mapping: {list(mapping.keys())[:10]}")
         st.write(f"Primeras categorías a enriquecer: {list(categoria_set)[:10]}")
-        # =========================
+        if products:
+            primer_producto = products[0]
+            cat_primer = primer_producto.get('categoria', primer_producto.get('categoría', 'N/A'))
+            st.write(f"📌 **Primer producto - categoría original:** '{cat_primer}'")
+            st.write(f"📌 **Categoría normalizada:** '{self._normalize_category(cat_primer if cat_primer else '')}'")
 
-        # 3. Aplicar el mapeo a cada producto
+        # 3. Aplicar el mapeo
         productos_actualizados = 0
         for p in products:
             cat_original = p.get('categoria')
             if not cat_original:
                 cat_original = p.get('categoría')
             if cat_original and isinstance(cat_original, str):
-                cat_clean = cat_original.strip()
+                cat_clean = self._normalize_category(cat_original)
                 if cat_clean in mapping:
                     enriched = mapping[cat_clean]
-                    # Siempre asignar confianza (puede ser 0)
-                    p['confianza_ia'] = enriched.get('confianza', 0.0)
-                    productos_actualizados += 1
-                    # Si hay categoria_razonada, sobrescribir
+                    # Siempre asignar confianza
+                    confianza = enriched.get('confianza', 0.0)
+                    p['confianza_ia'] = confianza
+                    if confianza > 0:
+                        productos_actualizados += 1
                     if enriched.get('categoria_razonada'):
                         p['categoria'] = enriched['categoria_razonada']
                         if 'categoría' in p:
@@ -128,60 +124,37 @@ class AIEnricher:
                     if enriched.get('linea_producto'):
                         p['linea_producto'] = enriched['linea_producto']
                 else:
-                    # Si no está en mapping, igual asignamos confianza 0 y dejamos categoría original
                     p['confianza_ia'] = 0.0
 
-        print(f"✅ Productos actualizados (con confianza asignada): {productos_actualizados} de {len(products)}")
-        st.write(f"📊 **Productos con confianza asignada: {productos_actualizados}**")
+        print(f"✅ Productos actualizados (con confianza > 0): {productos_actualizados} de {len(products)}")
+        st.write(f"📊 **Productos con confianza > 0: {productos_actualizados}**")
         return products
 
-    def _get_mapping_for_categories(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Obtiene el mapeo semántico para la lista de categorías únicas.
-        Retorna: {categoria_original: {"categoria_razonada": str, "linea_producto": str, "confianza": float}}
-        """
-        categories_sorted = sorted(categories)
-        cache_key = hashlib.md5(json.dumps(categories_sorted).encode()).hexdigest()
-
-        if cache_key in self.cache:
-            print(f"💾 Usando caché para {len(categories)} categorías")
-            return self.cache[cache_key]
-
-        # Si no está en caché, procesar
+    def _generate_mapping(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Genera mapping sin usar caché (para pruebas)."""
         if self.simulate:
             print("🔄 Usando simulación (sin IA)")
-            mapping = self._simulate_mapping(categories_sorted)
+            return self._simulate_mapping(categories)
         else:
-            print("🤖 Llamando a Gemini para enriquecer categorías...")
-            prompt = self._build_prompt(categories_sorted)
+            print("🤖 Llamando a Gemini...")
+            prompt = self._build_prompt(categories)
             response = self._call_llm(prompt)
-            mapping = self._parse_response(response, categories_sorted)
-            print(f"📥 Respuesta de Gemini procesada: {len(mapping)} categorías")
-
-        self.cache[cache_key] = mapping
-        return mapping
+            return self._parse_response(response, categories)
 
     def _simulate_mapping(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Simula el enriquecimiento sin llamar a la API.
-        Detecta líneas de producto por palabras clave y limpia la categoría.
-        """
         mapping = {}
         for cat in categories:
-            cat_upper = cat.upper()
+            cat_upper = cat
             linea = None
             categoria_razonada = cat
-
             lineas_keywords = ['CLASSIC', 'PROFESSIONAL', 'EXPERT', 'PREMIUM', 'BASIC', 'CAR EXPERT']
             for kw in lineas_keywords:
                 if kw in cat_upper:
                     linea = kw.capitalize()
                     categoria_razonada = cat_upper.replace(kw, '').strip()
                     break
-
             if not categoria_razonada:
                 categoria_razonada = cat
-
             mapping[cat] = {
                 "categoria_razonada": categoria_razonada,
                 "linea_producto": linea,
@@ -190,11 +163,7 @@ class AIEnricher:
         return mapping
 
     def _build_prompt(self, categories: List[str]) -> str:
-        """
-        Construye el prompt para Gemini. Pide un diccionario de traducción.
-        """
         categories_list = "\n".join([f"- {cat}" for cat in categories])
-
         prompt = f"""
 Eres un sistema de enriquecimiento semántico para catálogos de productos industriales.
 
@@ -238,9 +207,6 @@ Ahora, analiza la lista de categorías proporcionada.
         return prompt
 
     def _call_llm(self, prompt: str) -> str:
-        """
-        Llama a Gemini con manejo de errores.
-        """
         try:
             from google.genai import types
             response = self.client.models.generate_content(
@@ -259,15 +225,10 @@ Ahora, analiza la lista de categorías proporcionada.
             return "{}"
 
     def _parse_response(self, response: str, categories: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Parsea la respuesta del LLM y valida contra la lista de categorías originales.
-        Si falta alguna categoría, la rellena con un valor por defecto (sin cambios).
-        """
         try:
             data = json.loads(response)
             if not isinstance(data, dict):
                 raise ValueError("La respuesta no es un diccionario JSON")
-
             for cat in categories:
                 if cat not in data:
                     data[cat] = {
