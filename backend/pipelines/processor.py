@@ -4,6 +4,7 @@ Integra consolidación, normalización estructural, categorización por reglas, 
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
+import streamlit as st  # ← Importamos para usar mensajes visuales
 
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
@@ -12,6 +13,7 @@ from backend.pipelines.validators import Validator
 from backend.pipelines.context_detector import ContextDetector, FileContext
 from backend.pipelines.rule_categorizer import RuleCategorizer
 from backend.pipelines.ai_enricher import AIEnricher
+
 
 class PipelineProcessor:
     """Ejecuta el flujo completo de procesamiento sobre un DataFrame ya importado."""
@@ -26,31 +28,35 @@ class PipelineProcessor:
             enable_categorizer: Si se debe ejecutar la categorización por reglas locales.
             enable_ai: Si se debe ejecutar el enriquecimiento semántico con IA (Gemini).
         """
-        print("🚀 Inicializando PipelineProcessor...")
+        st.toast("🚀 Inicializando PipelineProcessor...")  # 👈 Mensaje visual
+
         self.mapper = ColumnMapper(confidence_threshold)
         self.normalizer = DataNormalizer()
         self.validator = Validator()
         self.enable_categorizer = enable_categorizer
         self.enable_ai = enable_ai
-        print(f"🔧 enable_ai = {self.enable_ai}")
 
         if self.enable_categorizer:
             self.categorizer = RuleCategorizer()
-            print("✅ RuleCategorizer inicializado")
-        else:
-            self.categorizer = None
+            st.toast("✅ RuleCategorizer inicializado")
 
         # Inicializar IA (si está habilitada)
         self.ai_enricher = None
+        self.ai_enabled = False  # ← Bandera para saber si la IA está operativa
+
         if self.enable_ai:
-            print("🧠 Inicializando AIEnricher...")
+            st.info("🧠 Inicializando AIEnricher...")
             try:
-                self.ai_enricher = AIEnricher()  # Si no tiene API key, internamente se pone en modo simulación.
-                print(f"✅ AIEnricher inicializado (simulate={self.ai_enricher.simulate})")
+                self.ai_enricher = AIEnricher()
+                self.ai_enabled = True
+                st.success("✅ Módulo de IA inicializado correctamente")
             except Exception as e:
-                print(f"❌ Error al inicializar AIEnricher: {e}")
-                self.ai_enricher = None
-        print("✅ PipelineProcessor listo.\n")
+                st.error(f"❌ Error al inicializar AIEnricher: {e}")
+                self.ai_enabled = False
+        else:
+            st.warning("⚠️ La IA está deshabilitada (enable_ai=False)")
+
+        st.success("✅ PipelineProcessor listo")
 
     def _inferir_categorias_de_titulos(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -105,6 +111,7 @@ class PipelineProcessor:
             groups.setdefault(field, []).append((conf, orig_col))
 
         df_result = pd.DataFrame(index=df.index)
+
         for field, cols_with_conf in groups.items():
             cols_sorted = [
                 col for _, col in sorted(cols_with_conf, key=lambda x: x[0], reverse=True)
@@ -127,41 +134,32 @@ class PipelineProcessor:
         - duplicates: productos con código duplicado
         - summary: métricas resumidas
         """
-        print(f"📥 Iniciando process() con DataFrame de shape: {df.shape}")
+        st.info(f"📥 Iniciando process() con DataFrame de shape: {df.shape}")
 
         # 0. Prevenir AttributeError con columnas
         df.columns = df.columns.astype(str)
 
-        # 🔥 INFERIR CATEGORÍAS DESDE TÍTULOS (Y ELIMINAR FILAS DE TÍTULO)
-        print("🔄 Infiriendo categorías desde títulos...")
+        # Inferir categorías desde títulos
         df = self._inferir_categorias_de_titulos(df)
-        print(f"📊 DataFrame después de inferir títulos: {df.shape}")
 
-        # 🔥 DETECTAR CONTEXTO GLOBAL (moneda y unidad por defecto)
+        # Detectar contexto
         context = FileContext()
         context.currency = ContextDetector.detect_currency(df)
         context.default_unit = ContextDetector.detect_unit(df)
         self.normalizer.context = context
         self.normalizer.default_unit = context.default_unit
-        print(f"💱 Contexto: moneda={context.currency}, unidad={context.default_unit}")
 
-        # 1. MAPEO DE COLUMNAS
-        print("🔍 Mapeando columnas...")
+        # 1. Mapeo de columnas
         mapping = self.mapper.map_columns(df)
         confidence_report = self.mapper.get_confidence_report(mapping)
 
-        # 🔥 FORZAR QUE 'categoria_heredada' sea mapeada con confianza máxima
         if 'categoria_heredada' in df.columns:
             mapping['categoria_heredada'] = ('categoria', 1.0)
 
-        # 1.5 CONSOLIDACIÓN (elimina columnas duplicadas)
-        print("🧩 Consolidando columnas...")
+        # 1.5 Consolidación
         df_clean = self.normalize_and_consolidate(df, mapping)
 
-        # ------------------------------------------------------------
-        # FILTROS DE LIMPIEZA DE FILAS BASURA
-        # ------------------------------------------------------------
-        # A. Eliminar filas donde 'codigo' y 'descripcion' son nulos o vacios
+        # Filtros de basura
         if 'codigo' in df_clean.columns and 'descripcion' in df_clean.columns:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_desc = df_clean['descripcion'].isna() | (df_clean['descripcion'].astype(str).str.strip() == '')
@@ -170,62 +168,61 @@ class PipelineProcessor:
             mask_codigo = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             df_clean = df_clean[~mask_codigo]
 
-        # B. Eliminar filas donde 'codigo' y 'precio_lista' están vacios
         if 'codigo' in df_clean.columns and 'precio_lista' in df_clean.columns:
             mask_codigo_vacio = df_clean['codigo'].isna() | (df_clean['codigo'].astype(str).str.strip() == '')
             mask_precio_vacio = df_clean['precio_lista'].isna() | (df_clean['precio_lista'].astype(str).str.strip() == '')
             df_clean = df_clean[~(mask_codigo_vacio & mask_precio_vacio)]
 
-        # C. Eliminar filas donde 'codigo' literalmente dice "CÓDIGO", "CÓDIGO" o "COD"
         if 'codigo' in df_clean.columns:
             codigo_str = df_clean['codigo'].astype(str).str.strip().str.upper()
-            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'COD'])
+            mascara_encabezado = codigo_str.isin(['CODIGO', 'CÓDIGO', 'CÓD'])
             df_clean = df_clean[~mascara_encabezado]
 
-        print(f"🧹 DataFrame después de limpieza: {df_clean.shape}")
-
-        # 2. NORMALIZACIÓN DE DATOS (síntesis de atributos)
-        print("🛠️ Normalizando datos...")
+        # 2. Normalización
         normalized_products = []
         for _, row in df_clean.iterrows():
             normalized = self.normalizer.normalize_row(row)
             normalized_products.append(normalized)
-        print(f"📦 {len(normalized_products)} productos normalizados")
 
-        # 2.5 CATEGORIZACIÓN POR REGLAS (local, sin IA)
+        # 2.5 Categorización por reglas
         if self.enable_categorizer and self.categorizer:
-            print("📋 Aplicando categorización por reglas...")
             normalized_products = self.categorizer.enrich(normalized_products)
-            print(f"📋 {len(normalized_products)} productos después de reglas")
 
-        # 2.6 ENRIQUECIMIENTO SEMÁNTICO CON IA (Gemini)
-        # Se ejecuta sobre las categorías ya normalizadas y regladas
-        print(f"🧠 Verificando IA: enable_ai={self.enable_ai}, ai_enricher={self.ai_enricher is not None}")
-        if self.enable_ai and self.ai_enricher:
-            print("🧠 Aplicando enriquecimiento con IA...")
-            try:
-                before = len(normalized_products)
-                normalized_products = self.ai_enricher.enrich(normalized_products)
-                after = len(normalized_products)
-                print(f"✅ Productos después de IA: {after} (cambiaron: {before != after})")
-            except Exception as e:
-                print(f"❌ Error en enriquecimiento IA: {e}")
-                import traceback
-                traceback.print_exc()
+        # =======================================================
+        # 🔥 2.6 ENRIQUECIMIENTO CON IA (con mensajes visuales)
+        # =======================================================
+        if self.ai_enabled and self.ai_enricher:
+            st.info("🧠 Aplicando enriquecimiento con IA...")
+
+            # Verificar que la columna 'categoria' existe en los productos
+            # Nota: normalized_products es una lista de diccionarios
+            tiene_categoria = any('categoria' in p for p in normalized_products)
+
+            if tiene_categoria:
+                try:
+                    antes = len(normalized_products)
+                    normalized_products = self.ai_enricher.enrich(normalized_products)
+                    despues = len(normalized_products)
+                    st.success(f"✅ IA aplicada a {despues} productos (cambiaron: {antes != despues})")
+                except Exception as e:
+                    st.error(f"❌ Error en enriquecimiento IA: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+            else:
+                st.warning("⚠️ No se encontró la columna 'categoria' en los productos. Se omite IA.")
         else:
-            print("⚠️ IA deshabilitada o no inicializada. Saltando enriquecimiento.")
+            st.warning("⚠️ IA deshabilitada o no inicializada. Saltando enriquecimiento.")
 
-        # 3. VALIDACIÓN
-        print("✅ Validando productos...")
+        # 3. Validación
         validation_report = self.validator.validate_all(normalized_products)
 
-        # 4. DETECTAR DUPLICADOS (básico por código)
+        # 4. Duplicados
         duplicates = self.find_duplicates(normalized_products)
 
-        # 5. GENERAR RESUMEN EJECUTIVO
+        # 5. Resumen
         summary = self.generate_summary(normalized_products, validation_report, duplicates)
 
-        print("🏁 Procesamiento completado.\n")
+        st.success("✅ Procesamiento completado")
         return {
             'mapping': mapping,
             'confidence_report': confidence_report,
@@ -237,7 +234,6 @@ class PipelineProcessor:
 
     @staticmethod
     def find_duplicates(products: List[Dict]) -> List[Dict]:
-        """Detecta productos con mismo código."""
         seen = {}
         duplicate_rows = []
         for idx, p in enumerate(products):
@@ -256,7 +252,6 @@ class PipelineProcessor:
 
     @staticmethod
     def generate_summary(products: List[Dict], validation: Dict, duplicates: List) -> Dict:
-        """Genera un resumen ejecutivo del procesamiento."""
         return {
             'total_rows': len(products),
             'valid_rows': validation['total_products'] - validation['error_count'],
