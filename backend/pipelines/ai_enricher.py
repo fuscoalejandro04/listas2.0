@@ -7,6 +7,7 @@ import json
 import hashlib
 import os
 from typing import List, Dict, Any, Optional, Set
+import streamlit as st  # Para mostrar debug en UI
 
 
 class AIEnricher:
@@ -34,14 +35,13 @@ class AIEnricher:
         # 1. Obtener API key
         self.api_key = api_key
         if not self.api_key:
-            # Intentar desde st.secrets (si estamos en Streamlit)
             try:
                 import streamlit as st
                 if "GEMINI_API_KEY" in st.secrets:
                     self.api_key = st.secrets["GEMINI_API_KEY"]
                     print("🔑 Clave API leída desde st.secrets")
             except ImportError:
-                print("⚠️ No se pudo importar streamlit (no estamos en entorno Streamlit)")
+                print("⚠️ No se pudo importar streamlit")
             except Exception as e:
                 print(f"⚠️ Error al leer st.secrets: {e}")
 
@@ -56,7 +56,6 @@ class AIEnricher:
         if self.simulate:
             print("⚠️ AIEnricher en modo SIMULACIÓN (sin API key o forzado).")
         else:
-            # Inicializar cliente Gemini
             try:
                 from google import genai
                 self.client = genai.Client(api_key=self.api_key)
@@ -70,7 +69,6 @@ class AIEnricher:
                 self.simulate = True
                 self.client = None
 
-        # Log final del estado
         print(f"🔑 AIEnricher: simulate={self.simulate}, api_key={'OK' if self.api_key else 'NO'}")
 
     def enrich(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -87,7 +85,6 @@ class AIEnricher:
         # 1. Extraer categorías únicas (ignorando nulos, vacíos y espacios)
         categoria_set: Set[str] = set()
         for p in products:
-            # Buscar 'categoria' o 'categoría' (con tilde)
             cat = p.get('categoria')
             if not cat:
                 cat = p.get('categoría')
@@ -104,10 +101,15 @@ class AIEnricher:
         mapping = self._get_mapping_for_categories(list(categoria_set))
         print(f"📊 Mapping generado para {len(mapping)} categorías")
 
+        # ===== DEBUG EN UI =====
+        st.write("🔍 **Debug del mapping:**")
+        st.write(f"Claves del mapping: {list(mapping.keys())[:10]}")
+        st.write(f"Primeras categorías a enriquecer: {list(categoria_set)[:10]}")
+        # =========================
+
         # 3. Aplicar el mapeo a cada producto
         productos_actualizados = 0
         for p in products:
-            # Buscar 'categoria' o 'categoría'
             cat_original = p.get('categoria')
             if not cat_original:
                 cat_original = p.get('categoría')
@@ -115,19 +117,22 @@ class AIEnricher:
                 cat_clean = cat_original.strip()
                 if cat_clean in mapping:
                     enriched = mapping[cat_clean]
-                    # Solo sobrescribir si hay un valor válido
-                    if enriched.get('categoria_razonada'):
-                        p['categoria'] = enriched['categoria_razonada']
-                        # Si existía 'categoría', la reemplazamos también
-                        if 'categoría' in p:
-                            p['categoría'] = enriched['categoria_razonada']
-                        productos_actualizados += 1
-                    if enriched.get('linea_producto'):
-                        p['linea_producto'] = enriched['linea_producto']
                     # Siempre asignar confianza (puede ser 0)
                     p['confianza_ia'] = enriched.get('confianza', 0.0)
+                    productos_actualizados += 1
+                    # Si hay categoria_razonada, sobrescribir
+                    if enriched.get('categoria_razonada'):
+                        p['categoria'] = enriched['categoria_razonada']
+                        if 'categoría' in p:
+                            p['categoría'] = enriched['categoria_razonada']
+                    if enriched.get('linea_producto'):
+                        p['linea_producto'] = enriched['linea_producto']
+                else:
+                    # Si no está en mapping, igual asignamos confianza 0 y dejamos categoría original
+                    p['confianza_ia'] = 0.0
 
-        print(f"✅ Productos actualizados: {productos_actualizados} de {len(products)}")
+        print(f"✅ Productos actualizados (con confianza asignada): {productos_actualizados} de {len(products)}")
+        st.write(f"📊 **Productos con confianza asignada: {productos_actualizados}**")
         return products
 
     def _get_mapping_for_categories(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -171,7 +176,6 @@ class AIEnricher:
             for kw in lineas_keywords:
                 if kw in cat_upper:
                     linea = kw.capitalize()
-                    # Remover la palabra clave de la categoría
                     categoria_razonada = cat_upper.replace(kw, '').strip()
                     break
 
@@ -181,7 +185,7 @@ class AIEnricher:
             mapping[cat] = {
                 "categoria_razonada": categoria_razonada,
                 "linea_producto": linea,
-                "confianza": 0.85  # Siempre 0.85 en simulación
+                "confianza": 0.85
             }
         return mapping
 
@@ -264,7 +268,6 @@ Ahora, analiza la lista de categorías proporcionada.
             if not isinstance(data, dict):
                 raise ValueError("La respuesta no es un diccionario JSON")
 
-            # Asegurar que todas las categorías estén presentes
             for cat in categories:
                 if cat not in data:
                     data[cat] = {
