@@ -4,7 +4,7 @@ Integra consolidación, normalización estructural, categorización por reglas, 
 """
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
-import streamlit as st  # ← Importamos para usar mensajes visuales
+import streamlit as st  # ← Importamos para mensajes visuales
 
 from backend.domain.taxonomy import TAXONOMY
 from backend.pipelines.detectors import ColumnMapper
@@ -28,7 +28,7 @@ class PipelineProcessor:
             enable_categorizer: Si se debe ejecutar la categorización por reglas locales.
             enable_ai: Si se debe ejecutar el enriquecimiento semántico con IA (Gemini).
         """
-        st.toast("🚀 Inicializando PipelineProcessor...")  # 👈 Mensaje visual
+        st.toast("🚀 Inicializando PipelineProcessor...")
 
         self.mapper = ColumnMapper(confidence_threshold)
         self.normalizer = DataNormalizer()
@@ -42,14 +42,14 @@ class PipelineProcessor:
 
         # Inicializar IA (si está habilitada)
         self.ai_enricher = None
-        self.ai_enabled = False  # ← Bandera para saber si la IA está operativa
+        self.ai_enabled = False
 
         if self.enable_ai:
             st.info("🧠 Inicializando AIEnricher...")
             try:
                 self.ai_enricher = AIEnricher()
                 self.ai_enabled = True
-                st.success("✅ Módulo de IA inicializado correctamente")
+                st.success(f"✅ Módulo de IA inicializado (simulate={self.ai_enricher.simulate})")
             except Exception as e:
                 st.error(f"❌ Error al inicializar AIEnricher: {e}")
                 self.ai_enabled = False
@@ -194,16 +194,27 @@ class PipelineProcessor:
         if self.ai_enabled and self.ai_enricher:
             st.info("🧠 Aplicando enriquecimiento con IA...")
 
-            # Verificar que la columna 'categoria' existe en los productos
-            # Nota: normalized_products es una lista de diccionarios
-            tiene_categoria = any('categoria' in p for p in normalized_products)
+            # Verificar que los productos tienen alguna clave de categoría
+            tiene_categoria = any(
+                ('categoria' in p and p['categoria']) or 
+                ('categoría' in p and p['categoría']) 
+                for p in normalized_products
+            )
 
             if tiene_categoria:
                 try:
                     antes = len(normalized_products)
                     normalized_products = self.ai_enricher.enrich(normalized_products)
                     despues = len(normalized_products)
-                    st.success(f"✅ IA aplicada a {despues} productos (cambiaron: {antes != despues})")
+                    
+                    # Contar cuántos tienen confianza > 0
+                    with_confianza = sum(1 for p in normalized_products if p.get('confianza_ia', 0) > 0)
+                    st.success(f"✅ IA aplicada: {with_confianza} productos enriquecidos de {despues}")
+                    
+                    # Mostrar algunas categorías de ejemplo
+                    if normalized_products:
+                        ejemplos = [p.get('categoria', p.get('categoría', 'N/A')) for p in normalized_products[:5]]
+                        st.caption(f"📌 Ejemplos de categorías enriquecidas: {', '.join(ejemplos)}")
                 except Exception as e:
                     st.error(f"❌ Error en enriquecimiento IA: {e}")
                     import traceback
