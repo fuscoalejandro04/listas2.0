@@ -1,6 +1,6 @@
-"""
+""" 
 Módulo Procesador - Orquesta todo el pipeline ETL.
-Integra mapeo, normalización estructural, categorización por reglas, IA y validación.
+Integra mapeo inteligente, normalización estructural, categorización por reglas, IA y validación. 
 """
 import pandas as pd
 import inspect
@@ -36,11 +36,27 @@ class PipelineProcessor:
         if hasattr(ContextDetector, 'detect_currency'):
             context.currency = ContextDetector.detect_currency(df)
             
-        # 2. Mapeo de columnas (ColumnMapper retorna dict {col_orig: col_taxonomia})
-        mapping_dict = self.column_mapper.map_columns(df) 
-        mapped_df = df.rename(columns=mapping_dict)
+        # 2. Mapeo de columnas (SOLUCIÓN AL ERROR DEL CSV VACÍO)
+        mapping_result = self.column_mapper.map_columns(df) 
         
-        # 3. Normalización básica
+        if isinstance(mapping_result, dict):
+            # Obtenemos los nombres oficiales de la taxonomía
+            taxonomy_keys = [f.name for f in TAXONOMY.fields] if hasattr(TAXONOMY, 'fields') else ['codigo', 'nombre_articulo', 'precio_lista']
+            
+            # Detectamos si el diccionario viene al revés {col_taxonomia: col_original}
+            if any(k in taxonomy_keys for k in mapping_result.keys()):
+                # Lo invertimos al formato correcto que requiere Pandas {col_original: col_taxonomia}
+                rename_dict = {v: k for k, v in mapping_result.items() if isinstance(v, str)}
+            else:
+                rename_dict = mapping_result
+                
+            mapped_df = df.rename(columns=rename_dict)
+        elif isinstance(mapping_result, pd.DataFrame):
+            mapped_df = mapping_result
+        else:
+            mapped_df = df.copy()
+        
+        # 3. Normalización básica (Blindada)
         if hasattr(self.normalizer, 'normalize_dataframe'):
             normalized_df = self.normalizer.normalize_dataframe(mapped_df, context)
         else:
@@ -55,10 +71,20 @@ class PipelineProcessor:
                 uses_context = len(sig.parameters) > 1
                 
                 def safe_normalize(row):
-                    res = norm_func(row, context) if uses_context else norm_func(row)
-                    return res if res is not None else row
+                    try:
+                        res = norm_func(row, context) if uses_context else norm_func(row)
+                        if res is None:
+                            return row
+                        # Si devuelve un modelo Product (Pydantic), lo convertimos a fila de Pandas
+                        if hasattr(res, 'dict'): 
+                            return pd.Series(res.dict())
+                        if isinstance(res, dict):
+                            return pd.Series(res)
+                        return res
+                    except Exception:
+                        return row
                 
-                normalized_df = mapped_df.apply(safe_normalize, axis=1, result_type='expand')
+                normalized_df = mapped_df.apply(safe_normalize, axis=1)
             else:
                 normalized_df = mapped_df.copy()
                 
@@ -75,7 +101,10 @@ class PipelineProcessor:
         
         # 5. Enriquecimiento Semántico con IA
         if getattr(self, 'ai_enabled', False) and 'categoria' in processed_df.columns:
-            categorias_unicas = processed_df['categoria'].dropna().unique().tolist()
+            # Filtramos para no enviarle a la IA datos vacíos o nulos
+            categorias = processed_df['categoria'].dropna().astype(str)
+            categorias = categorias[categorias.str.strip() != '']
+            categorias_unicas = categorias.unique().tolist()
             
             if categorias_unicas:
                 ai_results = self.ai_enricher.enrich_categories(categorias_unicas)
