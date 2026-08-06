@@ -6,6 +6,7 @@ Mantiene caché, modo simulación y manejo robusto de errores.
 import json
 import hashlib
 import os
+import re
 from typing import List, Dict, Any, Optional, Set
 import streamlit as st
 
@@ -29,12 +30,9 @@ class AIEnricher:
         self.api_key = api_key
         if not self.api_key:
             try:
-                import streamlit as st
                 if "GEMINI_API_KEY" in st.secrets:
                     self.api_key = st.secrets["GEMINI_API_KEY"]
                     print("🔑 Clave API leída desde st.secrets")
-            except ImportError:
-                print("⚠️ No se pudo importar streamlit")
             except Exception as e:
                 print(f"⚠️ Error al leer st.secrets: {e}")
 
@@ -88,7 +86,6 @@ class AIEnricher:
             return products
 
         # 2. Obtener el mapeo (SIN CACHÉ para esta prueba)
-        # Forzamos a que siempre se genere nuevo mapping
         mapping = self._generate_mapping(list(categoria_set))
         print(f"📊 Mapping generado para {len(mapping)} categorías")
 
@@ -220,15 +217,35 @@ Ahora, analiza la lista de categorías proporcionada.
             print("✅ Llamada a Gemini exitosa")
             return response.text
         except Exception as e:
-            print(f"❌ Error en llamada a Gemini: {e}. Cambiando a modo simulación.")
-            self.simulate = True
-            return "{}"
+            error_msg = f"🚨 Error en AIEnricher (llamada a Gemini): {str(e)}"
+            print(error_msg)
+            st.error(error_msg)
+            # Re‑lanzamos la excepción para que el pipeline falle de forma visible
+            raise RuntimeError(error_msg) from e
+
+    def _clean_response(self, response: str) -> str:
+        """
+        Elimina bloques de código Markdown (```json ... ```) y espacios
+        innecesarios que puedan envolver la respuesta de Gemini.
+        """
+        # Patrón para capturar bloques con o sin lenguaje (json)
+        pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+        match = re.search(pattern, response)
+        if match:
+            # Si hay bloque, devolvemos el contenido interior
+            return match.group(1).strip()
+        # Si no hay bloques, devolvemos el texto original limpio
+        return response.strip()
 
     def _parse_response(self, response: str, categories: List[str]) -> Dict[str, Dict[str, Any]]:
         try:
-            data = json.loads(response)
+            # Limpiar posibles envolturas Markdown
+            cleaned = self._clean_response(response)
+            data = json.loads(cleaned)
             if not isinstance(data, dict):
                 raise ValueError("La respuesta no es un diccionario JSON")
+
+            # Aseguramos que todas las categorías tengan entrada
             for cat in categories:
                 if cat not in data:
                     data[cat] = {
@@ -253,5 +270,8 @@ Ahora, analiza la lista de categorías proporcionada.
                             entry["confianza"] = 0.0
             return data
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"⚠️ Error al parsear respuesta: {e}. Usando simulación.")
-            return self._simulate_mapping(categories)
+            error_msg = f"🚨 Error en AIEnricher (parseo de respuesta): {str(e)}"
+            print(error_msg)
+            st.error(error_msg)
+            # Re‑lanzamos para que el pipeline falle de forma explícita
+            raise RuntimeError(error_msg) from e
