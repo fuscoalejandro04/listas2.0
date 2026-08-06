@@ -19,7 +19,7 @@ class AIEnricher:
 
     def __init__(self,
                  api_key: Optional[str] = None,
-                 model: str = "gemini-1.5-flash-latest",  # Cambio crítico: de 2.5 a 1.5
+                 model: str = "gemini-2.0-flash",
                  temperature: float = 0.1,
                  simulate: bool = False):
         self.model = model
