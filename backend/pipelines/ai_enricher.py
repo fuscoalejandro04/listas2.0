@@ -9,6 +9,7 @@ import os
 import re
 from typing import List, Dict, Any, Optional, Set
 import streamlit as st
+import time
 
 
 class AIEnricher:
@@ -204,6 +205,9 @@ Ahora, analiza la lista de categorías proporcionada.
         return prompt
 
     def _call_llm(self, prompt: str) -> str:
+        import time 
+        time.sleep(5)
+        
         try:
             from google.genai import types
             response = self.client.models.generate_content(
