@@ -221,24 +221,55 @@ Ahora, analiza la lista de categorías proporcionada.
         return prompt
 
     def _call_llm(self, prompt: str) -> str:
-        try:
-            from google.genai import types
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=self.temperature
-                ),
-            )
-            print("✅ Llamada a Gemini exitosa")
-            return response.text
-        except Exception as e:
-            error_msg = f"🚨 Error en AIEnricher (llamada a Gemini): {str(e)}"
-            print(error_msg)
-            st.error(error_msg)
-            # Re‑lanzamos la excepción para que el pipeline falle de forma visible
-            raise RuntimeError(error_msg) from e
+        """
+        Llama a Gemini con reintentos automáticos ante errores 429 (RESOURCE_EXHAUSTED).
+        Realiza hasta 4 intentos, esperando 60 segundos entre cada reintento.
+        """
+        max_retries = 4
+        attempt = 0
+        last_exception = None
+
+        while attempt < max_retries:
+            try:
+                from google.genai import types
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=self.temperature
+                    ),
+                )
+                print("✅ Llamada a Gemini exitosa")
+                return response.text
+
+            except Exception as e:
+                last_exception = e
+                error_str = str(e)
+                # Verificar si es error 429 (RESOURCE_EXHAUSTED)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    attempt += 1
+                    if attempt < max_retries:
+                        msg = f"⚠️ Cuota agotada (429). Esperando 60 segundos... (Intento {attempt}/{max_retries})"
+                        print(msg)
+                        st.warning("⏳ Límite de cuota de IA alcanzado. Pausando 60 segundos para enfriar la API...")
+                        time.sleep(60)
+                        continue  # Reintentar
+                    else:
+                        # Se agotaron los reintentos
+                        error_msg = f"🚨 Error en AIEnricher (llamada a Gemini): {error_str} - Reintentos agotados."
+                        print(error_msg)
+                        st.error(error_msg)
+                        raise RuntimeError(error_msg) from e
+                else:
+                    # Otro error, no reintentar
+                    error_msg = f"🚨 Error en AIEnricher (llamada a Gemini): {error_str}"
+                    print(error_msg)
+                    st.error(error_msg)
+                    raise RuntimeError(error_msg) from e
+
+        # Si salimos del bucle sin retorno (por si acaso)
+        raise RuntimeError("Reintentos fallidos") from last_exception
 
     def _clean_response(self, response: str) -> str:
         """
