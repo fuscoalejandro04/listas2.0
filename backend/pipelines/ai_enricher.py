@@ -255,37 +255,37 @@ Ahora, analiza la lista de categorías proporcionada.
         return response.strip()
 
     def _parse_response(self, response: str, categories: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Parsea la respuesta de la IA y valida que todas las categorías estén presentes.
+        Crea un nuevo diccionario para evitar mutaciones durante la iteración.
+        """
         try:
-            # Limpiar posibles envolturas Markdown
             cleaned = self._clean_response(response)
             data = json.loads(cleaned)
             if not isinstance(data, dict):
                 raise ValueError("La respuesta no es un diccionario JSON")
 
-            # Aseguramos que todas las categorías tengan entrada
+            # Construir un nuevo diccionario validado
+            validated_data = {}
             for cat in categories:
-                if cat not in data:
-                    data[cat] = {
+                # Si la categoría existe en la respuesta y es un diccionario válido
+                if cat in data and isinstance(data[cat], dict):
+                    entry = data[cat]
+                    # Asegurar que tenga todos los campos necesarios
+                    validated_data[cat] = {
+                        "categoria_razonada": entry.get("categoria_razonada", cat),
+                        "linea_producto": entry.get("linea_producto"),
+                        "confianza": entry.get("confianza", 0.0)
+                    }
+                else:
+                    # Valores por defecto
+                    validated_data[cat] = {
                         "categoria_razonada": cat,
                         "linea_producto": None,
                         "confianza": 0.0
                     }
-                else:
-                    entry = data[cat]
-                    if not isinstance(entry, dict):
-                        data[cat] = {
-                            "categoria_razonada": cat,
-                            "linea_producto": None,
-                            "confianza": 0.0
-                        }
-                    else:
-                        if "categoria_razonada" not in entry:
-                            entry["categoria_razonada"] = cat
-                        if "linea_producto" not in entry:
-                            entry["linea_producto"] = None
-                        if "confianza" not in entry:
-                            entry["confianza"] = 0.0
-            return data
+            return validated_data
+
         except (json.JSONDecodeError, ValueError) as e:
             error_msg = f"🚨 Error en AIEnricher (parseo de respuesta): {str(e)}"
             print(error_msg)
