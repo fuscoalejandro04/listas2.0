@@ -1,15 +1,16 @@
 """
-Módulo de Enriquecimiento Semántico con IA (LLM) - Gemini 2.5 Flash.
+Módulo de Enriquecimiento Semántico con IA (LLM) - Gemini 2.0 Flash.
 Optimizado por deduplicación sobre valores únicos de 'categoria'.
+Procesa por lotes (chunks) para evitar límites de tasa de la API.
 Mantiene caché, modo simulación y manejo robusto de errores.
 """
 import json
 import hashlib
 import os
 import re
+import time
 from typing import List, Dict, Any, Optional, Set
 import streamlit as st
-import time
 
 
 class AIEnricher:
@@ -86,21 +87,36 @@ class AIEnricher:
         if not categoria_set:
             return products
 
-        # 2. Obtener el mapeo (SIN CACHÉ para esta prueba)
-        mapping = self._generate_mapping(list(categoria_set))
-        print(f"📊 Mapping generado para {len(mapping)} categorías")
+        # 2. Dividir en lotes (chunks) de máximo 20 categorías
+        categories_list = list(categoria_set)
+        CHUNK_SIZE = 20
+        chunks = [categories_list[i:i + CHUNK_SIZE] for i in range(0, len(categories_list), CHUNK_SIZE)]
+        print(f"📦 Procesando {len(chunks)} lotes de hasta {CHUNK_SIZE} categorías cada uno.")
 
-        # Debug
+        mapping_total = {}
+        for idx, chunk in enumerate(chunks):
+            print(f"🔄 Procesando lote {idx+1}/{len(chunks)} con {len(chunk)} categorías...")
+            mapping_chunk = self._generate_mapping(chunk)
+            mapping_total.update(mapping_chunk)
+            print(f"✅ Lote {idx+1} completado. Acumulado: {len(mapping_total)} categorías.")
+            # Esperar 12 segundos entre lotes (excepto después del último)
+            if idx < len(chunks) - 1:
+                print("⏳ Pausa de 12 segundos para respetar límites de API...")
+                time.sleep(12)
+
+        print(f"📊 Mapping total generado para {len(mapping_total)} categorías")
+
+        # Debug (mostrar primeras claves)
         st.write("🔍 **Debug del mapping:**")
-        st.write(f"Claves del mapping: {list(mapping.keys())[:10]}")
-        st.write(f"Primeras categorías a enriquecer: {list(categoria_set)[:10]}")
+        st.write(f"Claves del mapping: {list(mapping_total.keys())[:10]}")
+        st.write(f"Primeras categorías a enriquecer: {categories_list[:10]}")
         if products:
             primer_producto = products[0]
             cat_primer = primer_producto.get('categoria', primer_producto.get('categoría', 'N/A'))
             st.write(f"📌 **Primer producto - categoría original:** '{cat_primer}'")
             st.write(f"📌 **Categoría normalizada:** '{self._normalize_category(cat_primer if cat_primer else '')}'")
 
-        # 3. Aplicar el mapeo
+        # 3. Aplicar el mapeo a los productos
         productos_actualizados = 0
         for p in products:
             cat_original = p.get('categoria')
@@ -108,8 +124,8 @@ class AIEnricher:
                 cat_original = p.get('categoría')
             if cat_original and isinstance(cat_original, str):
                 cat_clean = self._normalize_category(cat_original)
-                if cat_clean in mapping:
-                    enriched = mapping[cat_clean]
+                if cat_clean in mapping_total:
+                    enriched = mapping_total[cat_clean]
                     # Siempre asignar confianza
                     confianza = enriched.get('confianza', 0.0)
                     p['confianza_ia'] = confianza
@@ -129,12 +145,12 @@ class AIEnricher:
         return products
 
     def _generate_mapping(self, categories: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Genera mapping sin usar caché (para pruebas)."""
+        """Genera mapping para un lote de categorías (puede ser simulación o IA)."""
         if self.simulate:
             print("🔄 Usando simulación (sin IA)")
             return self._simulate_mapping(categories)
         else:
-            print("🤖 Llamando a Gemini...")
+            print(f"🤖 Llamando a Gemini con {len(categories)} categorías...")
             prompt = self._build_prompt(categories)
             response = self._call_llm(prompt)
             return self._parse_response(response, categories)
@@ -205,9 +221,6 @@ Ahora, analiza la lista de categorías proporcionada.
         return prompt
 
     def _call_llm(self, prompt: str) -> str:
-        import time 
-        time.sleep(5)
-        
         try:
             from google.genai import types
             response = self.client.models.generate_content(
