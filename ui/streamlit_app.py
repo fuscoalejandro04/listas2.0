@@ -109,7 +109,6 @@ if uploaded_file:
         
         # --- MAPEO ---
         st.subheader("3. Mapeo de Columnas")
-        # SE AGREGÓ "Marca" A LAS COLUMNAS A MAPEAR
         columnas_app = ['Codigo', 'Marca', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Herramienta', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
         opciones_columnas = ["--- No usar ---"] + list(df_raw.columns)
         mapeo = {}
@@ -141,7 +140,6 @@ if uploaded_file:
             if mapeo['Marca'] == "--- No usar ---":
                 df_limpio['Marca'] = marca_destino
             else:
-                # Si viene mapeada pero hay celdas vacías, las llena con la marca general
                 df_limpio['Marca'] = df_limpio['Marca'].fillna(marca_destino)
 
             df_limpio['Hoja_Origen'] = hoja_seleccionada
@@ -157,7 +155,7 @@ if uploaded_file:
             else:
                 df_limpio['IVA'] = 0.21
             
-            # 5. Limpieza de Códigos (Elimina las filas "fantasma")
+            # 5. Limpieza de Códigos
             if mapeo['Codigo'] != "--- No usar ---":
                 df_limpio = df_limpio.dropna(subset=['Codigo'], how='all')
                 df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -169,21 +167,33 @@ if uploaded_file:
             else:
                 st.error("⚠️ La hoja resultó vacía. Asegúrate de mapear bien la columna Código.")
 
-# --- SECCIÓN FINAL: DESCARGA ---
+# --- SECCIÓN FINAL: BARRIDA Y DESCARGA ---
 if not st.session_state.datos_acumulados.empty:
     st.markdown("---")
-    st.subheader("📦 Catálogo Final Acumulado")
+    st.subheader("🧹 Catálogo Final Acumulado y Optimizado")
     
     df_final = st.session_state.datos_acumulados.copy()
-    columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
+
+    # 1. Eliminar Códigos Fantasma (Subtítulos o basura): El código NO debe contener letras
+    df_final = df_final[~df_final['Codigo'].str.contains(r'[a-zA-Z]', na=False)]
     
+    # 2. Normalizar Marcas (Para que los filtros de app.py funcionen perfecto)
+    df_final['Marca'] = df_final['Marca'].astype(str).str.upper()
+    df_final['Marca'] = df_final['Marca'].replace({'EINHELL': 'Einhell', 'KWB': 'KWB'})
+    
+    # 3. Rellenar Vacíos Cruzados (Para que el buscador de app.py nunca falle)
+    df_final['Descripcion'] = df_final['Descripcion'].fillna(df_final['Modelo'])
+    df_final['Modelo'] = df_final['Modelo'].fillna(df_final['Descripcion'])
+    
+    # 4. Ordenar columnas como en Einhell_Limpia
+    columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
     for col in columnas_ordenadas:
         if col not in df_final.columns:
             df_final[col] = None
     df_final = df_final[columnas_ordenadas]
     
     st.dataframe(df_final.head(10), use_container_width=True)
-    st.info(f"Total de productos reales unificados: **{len(df_final)}** | Hojas procesadas: **{len(st.session_state.hojas_procesadas)}**")
+    st.info(f"Total de productos 100% puros: **{len(df_final)}** | Hojas procesadas: **{len(st.session_state.hojas_procesadas)}**")
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -192,7 +202,7 @@ if not st.session_state.datos_acumulados.empty:
     col1, col2 = st.columns([1, 2])
     with col1:
         st.download_button(
-            label=f"⬇️ Descargar Archivo Final ({archivo_salida})",
+            label=f"⬇️ Descargar Archivo Optimizado ({archivo_salida})",
             data=output.getvalue(),
             file_name=archivo_salida,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
