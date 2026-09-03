@@ -4,7 +4,7 @@ import io
 import re
 import unicodedata
 
-st.set_page_config(page_title="Procesador Mágico de Listas", layout="wide", page_icon="🪄")
+st.set_page_config(page_title="Procesador Manual de Listas", layout="wide", page_icon="📝")
 
 # --- FUNCIONES DE LIMPIEZA MÁGICA ---
 def normalizar_texto(texto):
@@ -35,116 +35,152 @@ def limpiar_iva(val):
         return num / 100.0 if num > 1 else num
     except: return 0.21
 
-# --- INTERFAZ ---
-st.title("🪄 Procesador Mágico Multihoja")
-st.markdown("Extrae, limpia y unifica listas de proveedores automáticamente para obtener un catálogo perfecto.")
+# --- MEMORIA DEL SISTEMA ---
+if 'datos_acumulados' not in st.session_state:
+    st.session_state.datos_acumulados = pd.DataFrame()
+if 'hojas_procesadas' not in st.session_state:
+    st.session_state.hojas_procesadas = []
 
-marca_destino = st.selectbox("¿A qué marca pertenece este catálogo?", ["Einhell", "KWB", "Fijaciones", "Penosil", "Otra"])
+# --- BARRA LATERAL ---
+st.sidebar.header("1. Configuración de Salida")
+marca_destino = st.sidebar.selectbox("¿A qué marca pertenece este catálogo?", ["Einhell", "KWB", "Fijaciones", "Penosil", "Otra"])
 archivo_salida = f"{marca_destino}_Limpia.xlsx" if marca_destino != "Otra" else "Productos_Limpia.xlsx"
+st.sidebar.info(f"El archivo final será: **{archivo_salida}**")
 
-uploaded_file = st.file_uploader("📂 Sube el Excel original del proveedor (ej. Lista EINHELL Y KWB...)", type=['xlsx', 'xls', 'csv'])
+if st.sidebar.button("🗑️ Reiniciar todo (Borrar memoria)", use_container_width=True):
+    st.session_state.datos_acumulados = pd.DataFrame()
+    st.session_state.hojas_procesadas = []
+    st.rerun()
+
+# --- ÁREA PRINCIPAL ---
+st.title("📝 Procesador Guiado Hoja por Hoja")
+st.markdown("Mapea tus columnas manualmente. Las hojas ya procesadas no se podrán volver a elegir.")
+
+uploaded_file = st.file_uploader("📂 Sube el Excel original del proveedor", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
     es_csv = uploaded_file.name.endswith('.csv')
     xls = uploaded_file if es_csv else pd.ExcelFile(uploaded_file)
     sheet_names = ["Hoja CSV"] if es_csv else xls.sheet_names
 
-    st.markdown("---")
-    
-    if st.button(f"⚡ Procesar TODO el Excel Automáticamente", type="primary", use_container_width=True):
-        with st.spinner("Escaneando hojas, extrayendo herramientas y limpiando precios..."):
-            datos_finales = []
-            hojas_procesadas = 0
-            
-            for sheet in sheet_names:
-                # 1. Encontrar la fila de encabezados correcta (Búsqueda estricta)
-                df_temp = pd.read_csv(xls, nrows=15, header=None) if es_csv else pd.read_excel(xls, sheet_name=sheet, nrows=15, header=None)
-                fila_header = -1
-                
-                for idx, row in df_temp.iterrows():
-                    # Analizamos celda por celda para no confundirnos con títulos largos
-                    celdas_limpias = [normalizar_texto(x) for x in row.values]
-                    if any(c in ['codigo', 'código', 'articulo', 'artículo'] for c in celdas_limpias):
-                        fila_header = idx
-                        break
-                
-                if fila_header == -1: continue # Salta portadas vacías (Lanzamientos, Combos, etc)
-                
-                # 2. Leer la hoja limpia a partir de la fila detectada
-                df_raw = pd.read_csv(xls, skiprows=fila_header) if es_csv else pd.read_excel(xls, sheet_name=sheet, skiprows=fila_header)
-                df_limpio = pd.DataFrame()
-                
-                # 3. Mapeo Inteligente
-                cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
-                
-                # Codigo
-                col_cod = next((c for n, c in cols_raw_norm.items() if n in ['codigo', 'articulo']), None)
-                df_limpio['Codigo'] = df_raw[col_cod] if col_cod else None
-                
-                # Modelo
-                col_mod = next((c for n, c in cols_raw_norm.items() if 'modelo' in n or 'nombre' in n), None)
-                df_limpio['Modelo'] = df_raw[col_mod] if col_mod else None
-                
-                # Descripción
-                col_desc = next((c for n, c in cols_raw_norm.items() if 'descrip' in n), None)
-                df_limpio['Descripcion'] = df_raw[col_desc] if col_desc else None
-                
-                # Precio
-                col_precio = next((c for n, c in cols_raw_norm.items() if 'precio' in n and 'sugerido' not in n), None)
-                df_limpio['Precio_Lista'] = df_raw[col_precio] if col_precio else 0.0
-                
-                # IVA
-                col_iva = next((c for n, c in cols_raw_norm.items() if 'iva' in n), None)
-                df_limpio['IVA'] = df_raw[col_iva] if col_iva else 0.21
+    # Filtrar hojas que ya fueron procesadas
+    hojas_disponibles = [hoja for hoja in sheet_names if hoja not in st.session_state.hojas_procesadas]
 
-                # 4. Magia de Limpieza
-                df_limpio['Hoja_Origen'] = sheet
-                df_limpio['Marca'] = marca_destino
+    st.markdown("---")
+
+    if not hojas_disponibles:
+        st.success("🎉 ¡Todas las hojas de este archivo han sido procesadas! Puedes descargar el catálogo final abajo.")
+    else:
+        st.subheader("2. Seleccionar y Mapear Hoja")
+        
+        col_hoja, col_fila = st.columns(2)
+        hoja_seleccionada = col_hoja.selectbox("Selecciona la hoja a procesar:", hojas_disponibles)
+        
+        # Auto-detectar la fila de títulos para sugerirla
+        df_temp = pd.read_csv(xls, nrows=15, header=None) if es_csv else pd.read_excel(xls, sheet_name=hoja_seleccionada, nrows=15, header=None)
+        fila_header_sugerida = 0
+        for idx, row in df_temp.iterrows():
+            celdas_limpias = [normalizar_texto(x) for x in row.values]
+            if any(c in ['codigo', 'código', 'articulo', 'artículo'] for c in celdas_limpias):
+                fila_header_sugerida = idx
+                break
                 
-                # Extraer Herramienta
+        fila_titulos = col_fila.number_input("Fila donde están los Títulos:", min_value=0, max_value=20, value=fila_header_sugerida)
+
+        # Leer la hoja con la fila seleccionada
+        df_raw = pd.read_csv(xls, skiprows=fila_titulos) if es_csv else pd.read_excel(xls, sheet_name=hoja_seleccionada, skiprows=fila_titulos)
+
+        st.caption("Vista previa (Verifica que los nombres de las columnas sean correctos):")
+        st.dataframe(df_raw.head(3), use_container_width=True)
+        st.markdown("---")
+        
+        # Mapeo de Columnas
+        st.subheader("3. Mapeo de Columnas")
+        columnas_app = ['Codigo', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Herramienta', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
+        opciones_columnas = ["--- No usar ---"] + list(df_raw.columns)
+        mapeo = {}
+        
+        cols = st.columns(3)
+        for i, col_esperada in enumerate(columnas_app):
+            with cols[i % 3]:
+                # Pre-selección inteligente
+                index_default = 0
+                c_esp_norm = normalizar_texto(col_esperada)
+                for j, c_orig in enumerate(opciones_columnas):
+                    c_orig_norm = normalizar_texto(c_orig)
+                    if c_esp_norm in c_orig_norm or (c_esp_norm == 'precio_lista' and 'precio' in c_orig_norm) or (c_esp_norm == 'descripcion' and 'descrip' in c_orig_norm):
+                        index_default = j
+                        break
+                mapeo[col_esperada] = st.selectbox(f"'{col_esperada}':", options=opciones_columnas, index=index_default, key=col_esperada)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(f"➕ Limpiar y Añadir '{hoja_seleccionada}' al Catálogo", type="primary", use_container_width=True):
+            df_limpio = pd.DataFrame()
+            
+            # 1. Aplicar mapeo
+            for col_esperada, col_origen in mapeo.items():
+                if col_origen != "--- No usar ---":
+                    df_limpio[col_esperada] = df_raw[col_origen]
+                else:
+                    df_limpio[col_esperada] = None 
+                    
+            df_limpio['Marca'] = marca_destino
+            df_limpio['Hoja_Origen'] = hoja_seleccionada
+            
+            # 2. La Magia: Extraer Herramienta si está mapeada la Descripción
+            if mapeo['Descripcion'] != "--- No usar ---":
                 df_limpio['Herramienta'] = df_limpio['Descripcion'].apply(extraer_herramienta)
-                
-                # Formatear números
+            elif mapeo['Herramienta'] == "--- No usar ---":
+                df_limpio['Herramienta'] = None
+
+            # 3. Limpieza Matemática
+            if mapeo['Precio_Lista'] != "--- No usar ---": 
                 df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
+            if mapeo['IVA'] != "--- No usar ---": 
                 df_limpio['IVA'] = df_limpio['IVA'].apply(limpiar_iva)
-                
-                # Limpiar Códigos
+            else:
+                df_limpio['IVA'] = 0.21
+            
+            # 4. Limpieza de Códigos
+            if mapeo['Codigo'] != "--- No usar ---":
                 df_limpio = df_limpio.dropna(subset=['Codigo'], how='all')
                 df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                
-                if not df_limpio.empty:
-                    datos_finales.append(df_limpio)
-                    hojas_procesadas += 1
 
-            # 5. Unificar todo
-            if datos_finales:
-                df_final = pd.concat(datos_finales, ignore_index=True)
-                
-                # ORDENAR COLUMNAS EXACTAMENTE COMO EN 'Einhell_Limpia.xlsx'
-                columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca']
-                for col in columnas_ordenadas:
-                    if col not in df_final.columns:
-                        df_final[col] = None
-                df_final = df_final[columnas_ordenadas]
-
-                st.success(f"✅ ¡Magia Terminada! Se combinaron {hojas_procesadas} hojas con más de {len(df_final)} productos.")
-                
-                st.subheader("📦 Resultado Final")
-                st.dataframe(df_final.head(15), use_container_width=True)
-                
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_final.to_excel(writer, index=False, sheet_name='Productos')
-                
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.download_button(
-                        label=f"⬇️ Descargar {archivo_salida}",
-                        data=output.getvalue(),
-                        file_name=archivo_salida,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True
-                    )
+            # 5. Acumular y bloquear hoja
+            if not df_limpio.empty:
+                st.session_state.datos_acumulados = pd.concat([st.session_state.datos_acumulados, df_limpio], ignore_index=True)
+                st.session_state.hojas_procesadas.append(hoja_seleccionada)
+                st.rerun() # Recarga la app al instante para actualizar el menú
             else:
-                st.error("No se encontraron datos procesables en el archivo.")
+                st.error("⚠️ La hoja resultó vacía. Asegúrate de mapear bien la columna Código.")
+
+# --- SECCIÓN FINAL: DESCARGA ---
+if not st.session_state.datos_acumulados.empty:
+    st.markdown("---")
+    st.subheader("📦 Catálogo Final Acumulado (Listo para app.py)")
+    
+    # Ordenar columnas como en Einhell_Limpia
+    df_final = st.session_state.datos_acumulados.copy()
+    columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca']
+    for col in columnas_ordenadas:
+        if col not in df_final.columns:
+            df_final[col] = None
+    df_final = df_final[columnas_ordenadas]
+    
+    st.dataframe(df_final.head(10), use_container_width=True)
+    st.info(f"Total de productos unificados hasta ahora: **{len(df_final)}** | Hojas procesadas: **{len(st.session_state.hojas_procesadas)}**")
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_final.to_excel(writer, index=False, sheet_name='Productos')
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.download_button(
+            label=f"⬇️ Descargar Archivo Final ({archivo_salida})",
+            data=output.getvalue(),
+            file_name=archivo_salida,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
