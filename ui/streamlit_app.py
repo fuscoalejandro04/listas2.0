@@ -6,19 +6,16 @@ import unicodedata
 
 st.set_page_config(page_title="Procesador Mágico de Listas", layout="wide", page_icon="🪄")
 
-# --- FUNCIONES DE LIMPIEZA MÁGICA (COMO LA VERSIÓN VIEJA) ---
+# --- FUNCIONES DE LIMPIEZA MÁGICA ---
 def normalizar_texto(texto):
     if pd.isna(texto): return ""
-    return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8').lower()
+    return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8').lower().strip()
 
 def extraer_herramienta(descripcion):
-    """Esta es la magia: corta la descripción antes de los números, W, V, RPM para sacar el nombre limpio"""
     texto = str(descripcion).upper()
-    # Cortar cuando empiezan los números, potencias o palabras extrañas
     match = re.split(r'(\d+|\||-|\bW\b|\bV\b|\bBARES\b|\bRPM\b|\bA BATERÍA\b|\bMM\b|\bCM\b)', texto)
     if match:
         herramienta = match[0].strip()
-        # Normalizar palabras comunes
         herramienta = herramienta.replace('ELÉCTRICO', 'ELÉCTRICA')
         return herramienta
     return texto.strip()
@@ -60,26 +57,28 @@ if uploaded_file:
             hojas_procesadas = 0
             
             for sheet in sheet_names:
-                # 1. Encontrar la fila de encabezados
+                # 1. Encontrar la fila de encabezados correcta (Búsqueda estricta)
                 df_temp = pd.read_csv(xls, nrows=15, header=None) if es_csv else pd.read_excel(xls, sheet_name=sheet, nrows=15, header=None)
                 fila_header = -1
+                
                 for idx, row in df_temp.iterrows():
-                    row_str = normalizar_texto(" ".join([str(x) for x in row.values]))
-                    if "codigo" in row_str or "precio" in row_str or "articulo" in row_str:
+                    # Analizamos celda por celda para no confundirnos con títulos largos
+                    celdas_limpias = [normalizar_texto(x) for x in row.values]
+                    if any(c in ['codigo', 'código', 'articulo', 'artículo'] for c in celdas_limpias):
                         fila_header = idx
                         break
                 
-                if fila_header == -1: continue # Salta portadas o hojas vacías
+                if fila_header == -1: continue # Salta portadas vacías (Lanzamientos, Combos, etc)
                 
-                # 2. Leer la hoja limpia
+                # 2. Leer la hoja limpia a partir de la fila detectada
                 df_raw = pd.read_csv(xls, skiprows=fila_header) if es_csv else pd.read_excel(xls, sheet_name=sheet, skiprows=fila_header)
                 df_limpio = pd.DataFrame()
                 
-                # 3. Búsqueda inteligente de columnas
+                # 3. Mapeo Inteligente
                 cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
                 
                 # Codigo
-                col_cod = next((c for n, c in cols_raw_norm.items() if 'codigo' in n or 'articulo' in n), None)
+                col_cod = next((c for n, c in cols_raw_norm.items() if n in ['codigo', 'articulo']), None)
                 df_limpio['Codigo'] = df_raw[col_cod] if col_cod else None
                 
                 # Modelo
@@ -102,19 +101,20 @@ if uploaded_file:
                 df_limpio['Hoja_Origen'] = sheet
                 df_limpio['Marca'] = marca_destino
                 
-                # Extraer Herramienta como en la versión vieja
+                # Extraer Herramienta
                 df_limpio['Herramienta'] = df_limpio['Descripcion'].apply(extraer_herramienta)
                 
                 # Formatear números
                 df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
                 df_limpio['IVA'] = df_limpio['IVA'].apply(limpiar_iva)
                 
-                # Limpiar Códigos (quitar .0)
+                # Limpiar Códigos
                 df_limpio = df_limpio.dropna(subset=['Codigo'], how='all')
                 df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                 
-                datos_finales.append(df_limpio)
-                hojas_procesadas += 1
+                if not df_limpio.empty:
+                    datos_finales.append(df_limpio)
+                    hojas_procesadas += 1
 
             # 5. Unificar todo
             if datos_finales:
@@ -122,15 +122,14 @@ if uploaded_file:
                 
                 # ORDENAR COLUMNAS EXACTAMENTE COMO EN 'Einhell_Limpia.xlsx'
                 columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca']
-                # Si falta alguna columna, la agregamos vacía, y filtramos
                 for col in columnas_ordenadas:
                     if col not in df_final.columns:
                         df_final[col] = None
                 df_final = df_final[columnas_ordenadas]
 
-                st.success(f"✅ ¡Magia Terminada! Se combinaron {hojas_procesadas} hojas y se extrajeron las herramientas.")
+                st.success(f"✅ ¡Magia Terminada! Se combinaron {hojas_procesadas} hojas con más de {len(df_final)} productos.")
                 
-                st.subheader("📦 Resultado Final (Idéntico a la versión anterior)")
+                st.subheader("📦 Resultado Final")
                 st.dataframe(df_final.head(15), use_container_width=True)
                 
                 output = io.BytesIO()
