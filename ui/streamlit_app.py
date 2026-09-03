@@ -1,314 +1,123 @@
-import sys
-import os
-from pathlib import Path
-
-# 1. Calcular la ruta absoluta de la raíz del repositorio (listas2.0)
-root_path = str(Path(__file__).resolve().parent.parent)
-
-# 2. Inyectar la ruta en sys.path ANTES de importar cualquier módulo interno
-if root_path not in sys.path:
-    sys.path.insert(0, root_path)
-
-# 3. Importar librerías de terceros
 import streamlit as st
 import pandas as pd
 import io
-import importlib.util
 
-# 4. Importar módulos de backend
-from backend.domain.taxonomy import TAXONOMY
-from backend.pipelines.processor import PipelineProcessor
-from backend.pipelines.rule_categorizer import RuleCategorizer
+st.set_page_config(page_title="Procesador de Listas de Precios", layout="wide")
 
-# ============================================================
-# CARGA MANUAL DEL IMPORTADOR DE EXCEL
-# ============================================================
-def load_import_excel():
-    """Carga la función import_excel desde backend/pipelines/importers.py"""
-    filepath = Path(__file__).resolve().parent.parent / "backend" / "pipelines" / "importers.py"
-    if not filepath.exists():
-        st.error(f"❌ No se encuentra el archivo: {filepath}")
-        return None
+st.title("⚙️ Procesador y Limpiador de Listas de Precios")
+st.markdown("Herramienta rápida sin IA para adaptar listas de proveedores a la **App de Gestión de Pedidos**.")
 
-    spec = importlib.util.spec_from_file_location("importers_module", filepath)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if hasattr(module, "import_excel"):
-        return module.import_excel
-    else:
-        st.error("❌ La función 'import_excel' no se encontró en el módulo.")
-        return None
-
-import_excel = load_import_excel()
-if import_excel is None:
-    st.stop()
-
-# ============================================================
-# CONFIGURACIÓN DE LA PÁGINA
-# ============================================================
-st.set_page_config(
-    page_title="AIPDP - AI Product Data Platform",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# 1. Parámetros de Exportación
+st.sidebar.header("1. Configuración de Salida")
+marca_destino = st.sidebar.selectbox(
+    "¿De qué marca es esta lista?", 
+    ["Einhell", "KWB", "Fijaciones", "Penosil", "Otra"]
 )
 
-# ============================================================
-# PESTAÑAS PRINCIPALES
-# ============================================================
-tab1, tab2 = st.tabs(["⚡ Pipeline ETL", "⚙️ Configuración de Reglas"])
+# Nombres exactos que espera app.py
+nombres_archivo_salida = {
+    "Einhell": "Einhell_Limpia.xlsx",
+    "KWB": "KWB_Limpia.xlsx",
+    "Fijaciones": "Fijaciones_Limpia.xlsx",
+    "Penosil": "Penosil_Limpia.xlsx",
+    "Otra": "Productos_Limpia.xlsx"
+}
+archivo_salida = nombres_archivo_salida[marca_destino]
 
-# ============================================================
-# PESTAÑA 1: PIPELINE ETL
-# ============================================================
-with tab1:
-    st.title("🧠 AI Product Data Platform (AIPDP)")
-    st.caption("Sistema central de conocimiento sobre productos - Pipeline ETL Activo con importación profesional")
+st.sidebar.info(f"El archivo se exportará como: **{archivo_salida}** listos para app.py")
 
-    # Sidebar con estado del sistema
-    with st.sidebar:
-        st.header("📊 Estado del Sistema")
-        st.metric("Campos en Taxonomía", len(TAXONOMY.fields))
-        st.metric("Sinónimos Registrados", len(TAXONOMY.get_all_aliases()))
+# 2. Carga de Archivo
+st.subheader("2. Cargar Lista del Proveedor")
+uploaded_file = st.file_uploader("Sube el Excel original del proveedor", type=['xlsx', 'xls', 'csv'])
 
-        st.divider()
-        st.subheader("📋 Taxonomía Activa")
-        for field in TAXONOMY.fields[:5]:
-            required_tag = "🔴 Obligatorio" if field.required else "⚪ Opcional"
-            st.markdown(f"**{field.name}** (*{field.data_type}*) - {required_tag}")
-            if field.aliases:
-                st.caption(f"Alias: {', '.join(field.aliases[:3])}")
-
-    # Área principal
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("🚀 Importar y Procesar Catálogo")
-        uploaded_file = st.file_uploader(
-            "Arrastra tu archivo (Excel, CSV) o selecciona",
-            type=['xlsx', 'xls', 'csv'],
-            accept_multiple_files=False
-        )
-
-        if uploaded_file is not None:
-            with st.spinner("⏳ Procesando archivo... Esto puede tomar unos segundos."):
-                try:
-                    # =================================================
-                    # 1. IMPORTACIÓN PROFESIONAL (HOJA POR HOJA)
-                    # =================================================
-                    import_result = import_excel(uploaded_file.read(), uploaded_file.name)
-
-                    # Mostrar resumen de la importación
-                    if import_result.failed_sheets:
-                        st.warning(f"⚠️ {len(import_result.failed_sheets)} hoja(s) fallaron al importar.")
-                        for failed in import_result.failed_sheets:
-                            st.caption(f"- {failed.sheet_name}: {failed.error}")
-
-                    if not import_result.successful_sheets:
-                        st.error("❌ No se pudo procesar ninguna hoja del archivo.")
-                        st.stop()
-
-                    # Combinar todas las hojas exitosas en un solo DataFrame
-                    dfs = []
-                    for sheet_result in import_result.successful_sheets:
-                        if sheet_result.dataframe is not None and not sheet_result.dataframe.empty:
-                            df = sheet_result.dataframe.copy()
-                            df['hoja_origen'] = sheet_result.sheet_name
-                            dfs.append(df)
-
-                    if not dfs:
-                        st.error("❌ Las hojas procesadas no contienen datos válidos.")
-                        st.stop()
-
-                    df_raw = pd.concat(dfs, ignore_index=True)
-
-                    # Información del archivo procesado
-                    sheet_names = [sr.sheet_name for sr in import_result.successful_sheets]
-                    st.info(f"📂 Archivo procesado con {len(sheet_names)} hojas: {', '.join(sheet_names[:5])}{'...' if len(sheet_names) > 5 else ''}. Total de filas: {df_raw.shape[0]}, columnas: {df_raw.shape[1]}")
-
-                    # =================================================
-                    # 2. PIPELINE ETL
-                    # =================================================
-                    # 🔥 IMPORTANTE: enable_ai=True para activar Gemini
-                    processor = PipelineProcessor(
-                        confidence_threshold=0.80,
-                        enable_categorizer=True,
-                        enable_ai=True  # ← ¡ACTIVADO!
-                    )
-                    process_result = processor.process(df_raw)
-
-                    # Resumen ejecutivo
-                    summary = process_result['summary']
-                    st.success(f"✅ Procesamiento completado: {summary['total_rows']} productos")
-
-                    # Métricas principales
-                    col_met1, col_met2, col_met3, col_met4 = st.columns(4)
-                    col_met1.metric("Productos", summary['total_rows'])
-                    col_met2.metric("Errores", summary['error_rows'], delta="⚠️")
-                    col_met3.metric("Advertencias", summary['warning_rows'], delta="⚡")
-                    col_met4.metric("Calidad", f"{summary['quality_score']*100:.0f}%", delta="📈")
-
-                    # 3. Mapeo de columnas
-                    with st.expander("🔍 Mapeo de Columnas (Confianza)"):
-                        mapping_df = pd.DataFrame([
-                            {"Columna Origen": col, "Campo Taxonomía": field if field else "❓ No detectado", "Confianza": f"{conf*100:.0f}%"}
-                            for col, (field, conf) in process_result['mapping'].items()
-                        ])
-                        st.dataframe(mapping_df, use_container_width=True)
-
-                    # 4. Vista previa de productos normalizados
-                    with st.expander("📊 Productos Normalizados (Vista previa)", expanded=True):
-                        if process_result['products']:
-                            df_normalized = pd.DataFrame(process_result['products'])
-                            # Columnas clave para mostrar
-                            cols_to_show = ['codigo', 'nombre_articulo', 'precio_lista', 'marca', 'modelo', 'categoria', 'linea_producto', 'confianza_ia']
-                            available_cols = [col for col in cols_to_show if col in df_normalized.columns]
-                            st.dataframe(df_normalized[available_cols].head(20), use_container_width=True)
-                            st.caption(f"Mostrando 20 de {len(process_result['products'])} productos")
-                        else:
-                            st.warning("No se generaron productos.")
-
-                    # 5. Reporte de validación
-                    with st.expander("⚠️ Reporte de Calidad y Validación"):
-                        issues = process_result['validation_report']['issues']
-                        if issues:
-                            issues_df = pd.DataFrame(issues)
-                            st.dataframe(issues_df, use_container_width=True)
-                        else:
-                            st.success("✅ No se encontraron errores ni advertencias.")
-
-                        if process_result['duplicates']:
-                            st.warning(f"⚠️ Se detectaron {len(process_result['duplicates'])} productos con código duplicado.")
-                            dup_df = pd.DataFrame(process_result['duplicates'])
-                            st.dataframe(dup_df)
-
-                    # 6. Descarga en Excel y CSV
-                    st.subheader("📥 Descargar Catálogo Normalizado")
-
-                    # 🔥 Crear DataFrame de exportación con formato limpio
-                    df_export = pd.DataFrame(process_result['products'])
-
-                    # 🔥 a) Redondear todas las columnas que empiecen con 'precio_' a 2 decimales
-                    precio_cols = [col for col in df_export.columns if col.startswith('precio_')]
-                    for col in precio_cols:
-                        if col in df_export.columns and df_export[col].dtype in ['float64', 'float32']:
-                            df_export[col] = df_export[col].round(2)
-
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        df_export.to_excel(writer, sheet_name='Productos Normalizados', index=False)
-
-                        if issues:
-                            issues_df = pd.DataFrame(issues)
-                            issues_df.to_excel(writer, sheet_name='Validaciones', index=False)
-
-                        mapping_export = pd.DataFrame([
-                            {"Columna Origen": col, "Campo Taxonomía": field if field else "No detectado", "Confianza": f"{conf*100:.0f}%"}
-                            for col, (field, conf) in process_result['mapping'].items()
-                        ])
-                        mapping_export.to_excel(writer, sheet_name='Mapeo de Columnas', index=False)
-
-                    output.seek(0)
-                    st.download_button(
-                        label="📥 Descargar Excel Completo",
-                        data=output,
-                        file_name=f"{uploaded_file.name.split('.')[0]}_procesado.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-                    # CSV con el mismo formato limpio
-                    csv_data = df_export.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Descargar CSV (solo datos)",
-                        data=csv_data,
-                        file_name=f"{uploaded_file.name.split('.')[0]}_normalizado.csv",
-                        mime="text/csv"
-                    )
-
-                except Exception as e:
-                    st.error(f"❌ Error durante el procesamiento: {str(e)}")
-                    st.exception(e)
-
-    with col2:
-        st.subheader("📈 Confianza del Sistema")
-        st.metric("Confianza Global", "N/A", delta="Sube un archivo para evaluar")
-        st.metric("Productos en Memoria", "0")
-
-        st.divider()
-        st.caption("⚡ Pipeline: Importación Profesional → Detectar → Normalizar → Categorizar → IA → Validar")
-
-    st.divider()
-    st.caption("AIPDP v0.6.0 - Pipeline con Gemini IA integrado")
-
-# ============================================================
-# PESTAÑA 2: CONFIGURACIÓN DE REGLAS (CRUD)
-# ============================================================
-with tab2:
-    st.header("⚙️ Configuración de Reglas")
-    st.caption("Gestiona las líneas de producto que el sistema reconoce para categorización.")
-
-    # Inicializar el categorizador
-    categorizer = RuleCategorizer()
-
-    # Mostrar lista actual
-    st.subheader("📋 Líneas de Producto Actuales")
-    lineas = categorizer.obtener_lineas() if hasattr(categorizer, 'obtener_lineas') else []
-
-    if lineas:
-        df_lineas = pd.DataFrame({"Línea": lineas})
-        st.dataframe(df_lineas, use_container_width=True, hide_index=True)
+if uploaded_file:
+    # Leer archivo
+    if uploaded_file.name.endswith('.csv'):
+        df_raw = pd.read_csv(uploaded_file)
     else:
-        st.info("No hay líneas configuradas.")
+        df_raw = pd.read_excel(uploaded_file)
+    
+    st.success(f"Archivo cargado. {df_raw.shape[0]} filas x {df_raw.shape[1]} columnas.")
+    
+    with st.expander("Ver datos originales"):
+        st.dataframe(df_raw.head(10))
 
-    st.divider()
+    st.markdown("---")
+    st.subheader("3. Mapeo de Columnas (Alinear con app.py)")
+    st.write("Indica qué columna del Excel original corresponde a los campos obligatorios de la app de pedidos.")
+    
+    # Columnas que espera app.py
+    columnas_app = ['Codigo', 'Modelo', 'Descripcion', 'Precio_Lista', 'Herramienta', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
+    
+    cols = st.columns(3)
+    mapeo = {}
+    
+    opciones_columnas = ["--- No usar ---"] + list(df_raw.columns)
+    
+    for i, col_esperada in enumerate(columnas_app):
+        with cols[i % 3]:
+            # Intentar auto-detectar
+            index_default = 0
+            for j, c_orig in enumerate(opciones_columnas):
+                if col_esperada.lower() in c_orig.lower():
+                    index_default = j
+                    break
+                    
+            mapeo[col_esperada] = st.selectbox(f"Columna para '{col_esperada}':", options=opciones_columnas, index=index_default)
+    
+    # Configuraciones extra
+    st.markdown("---")
+    st.subheader("4. Limpieza de Precios e IVA")
+    col_iva, col_hoja = st.columns(2)
+    iva_default = col_iva.selectbox("IVA por defecto (generalmente 21%)", [0.21, 0.105])
+    hoja_origen = col_hoja.text_input("Hoja de Origen (opcional)", value=marca_destino)
 
-    # CRUD: Agregar nueva línea
-    st.subheader("➕ Agregar Nueva Línea")
-    col_add1, col_add2 = st.columns([3, 1])
-    with col_add1:
-        nueva_linea = st.text_input("Nombre de la línea (ej. PREMIUM PLUS)", key="nueva_linea_input")
-    with col_add2:
-        st.write("")
-        st.write("")
-        btn_agregar = st.button("Agregar Línea", type="primary", use_container_width=True)
-
-    if btn_agregar:
-        if nueva_linea and nueva_linea.strip():
-            if categorizer.agregar_linea(nueva_linea.strip()):
-                st.success(f"✅ Línea '{nueva_linea.strip()}' agregada correctamente.")
-                st.rerun()
-            else:
-                st.warning(f"⚠️ La línea '{nueva_linea.strip()}' ya existe o es inválida.")
-        else:
-            st.error("❌ Ingresa un nombre válido para la línea.")
-
-    st.divider()
-
-    # CRUD: Eliminar línea existente
-    st.subheader("🗑️ Eliminar Línea")
-    if lineas:
-        col_del1, col_del2 = st.columns([3, 1])
-        with col_del1:
-            linea_a_eliminar = st.selectbox(
-                "Selecciona una línea para eliminar",
-                options=lineas,
-                key="eliminar_linea_select"
-            )
-        with col_del2:
-            st.write("")
-            st.write("")
-            btn_eliminar = st.button("Eliminar Línea", type="secondary", use_container_width=True)
-
-        if btn_eliminar:
-            if linea_a_eliminar:
-                if categorizer.eliminar_linea(linea_a_eliminar):
-                    st.success(f"✅ Línea '{linea_a_eliminar}' eliminada correctamente.")
-                    st.rerun()
+    if st.button("🚀 Procesar Lista y Generar Archivo Limpio", type="primary"):
+        with st.spinner("Procesando datos..."):
+            df_limpio = pd.DataFrame()
+            
+            # Aplicar el mapeo
+            for col_esperada, col_origen in mapeo.items():
+                if col_origen != "--- No usar ---":
+                    df_limpio[col_esperada] = df_raw[col_origen]
                 else:
-                    st.error(f"❌ Error al eliminar la línea '{linea_a_eliminar}'.")
-    else:
-        st.info("No hay líneas para eliminar.")
+                    df_limpio[col_esperada] = None # Llenar con None para que app.py no falle
+            
+            # Forzar campos obligatorios de app.py
+            df_limpio['Marca'] = marca_destino
+            df_limpio['IVA'] = iva_default
+            df_limpio['Hoja_Origen'] = hoja_origen
+            
+            # Limpiar precios (quitar signos de dolar, comas, espacios y convertir a float)
+            if 'Precio_Lista' in df_limpio.columns:
+                def limpiar_precio(val):
+                    if pd.isna(val): return 0.0
+                    if isinstance(val, (int, float)): return float(val)
+                    val = str(val).replace('$', '').replace('.', '').replace(',', '.').strip()
+                    try: return float(val)
+                    except: return 0.0
+                
+                df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
 
-    st.divider()
-    st.caption("💡 Los cambios se guardan automáticamente en el archivo `backend/infrastructure/knowledge/lineas_producto.json`.")
+            # Limpiar Códigos (asegurar que sean string sin el .0 al final)
+            if 'Codigo' in df_limpio.columns:
+                df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            
+            st.success("✅ Procesamiento completado.")
+            
+            st.subheader("Vista Previa de la Lista Optimizada")
+            st.dataframe(df_limpio.head(15), use_container_width=True)
+            
+            # Exportar a Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_limpio.to_excel(writer, index=False, sheet_name='Productos')
+            
+            st.download_button(
+                label=f"📥 Descargar {archivo_salida}",
+                data=output.getvalue(),
+                file_name=archivo_salida,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+            st.info("Paso final: Descarga este archivo, colócalo en la misma carpeta que tu app.py, y la app de pedidos lo leerá a la perfección.")
