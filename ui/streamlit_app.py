@@ -1,16 +1,27 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 import unicodedata
 
-st.set_page_config(page_title="Procesador Multihoja", layout="wide", page_icon="⚙️")
+st.set_page_config(page_title="Procesador Mágico de Listas", layout="wide", page_icon="🪄")
 
-# --- FUNCIONES CENTRALES ---
+# --- FUNCIONES DE LIMPIEZA MÁGICA (COMO LA VERSIÓN VIEJA) ---
 def normalizar_texto(texto):
-    """Quita tildes y pasa a minúsculas para comparar columnas sin errores."""
     if pd.isna(texto): return ""
-    texto = str(texto)
-    return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8').lower()
+    return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8').lower()
+
+def extraer_herramienta(descripcion):
+    """Esta es la magia: corta la descripción antes de los números, W, V, RPM para sacar el nombre limpio"""
+    texto = str(descripcion).upper()
+    # Cortar cuando empiezan los números, potencias o palabras extrañas
+    match = re.split(r'(\d+|\||-|\bW\b|\bV\b|\bBARES\b|\bRPM\b|\bA BATERÍA\b|\bMM\b|\bCM\b)', texto)
+    if match:
+        herramienta = match[0].strip()
+        # Normalizar palabras comunes
+        herramienta = herramienta.replace('ELÉCTRICO', 'ELÉCTRICA')
+        return herramienta
+    return texto.strip()
 
 def limpiar_precio(val):
     if pd.isna(val): return 0.0
@@ -27,48 +38,14 @@ def limpiar_iva(val):
         return num / 100.0 if num > 1 else num
     except: return 0.21
 
-def deducir_herramienta(row):
-    """ESTA ES LA FUNCIÓN QUE REEMPLAZA A LA IA PARA AGRUPAR CATEGORÍAS"""
-    texto = str(row.get('Descripcion', '')) + " " + str(row.get('Modelo', ''))
-    texto = normalizar_texto(texto)
-    
-    # 1. Agrupar Familia
-    cat = "Herramienta General"
-    if any(x in texto for x in ['taladro', 'atornillador', 'llave de impacto']): cat = "Taladro / Atornillador"
-    elif any(x in texto for x in ['amoladora', 'pulidora', 'lijadora']): cat = "Amoladora / Lijadora"
-    elif any(x in texto for x in ['sierra', 'caladora', 'ingleteadora', 'sensitiva']): cat = "Sierras"
-    elif 'rotomartillo' in texto or 'martillo' in texto: cat = "Rotomartillo"
-    elif 'compresor' in texto: cat = "Compresor"
-    elif 'aspiradora' in texto or 'hidrolavadora' in texto: cat = "Limpieza"
-    elif any(x in texto for x in ['motosierra', 'cortacesped', 'bordeadora', 'desmalezadora', 'soplador']): cat = "Jardín"
-    elif any(x in texto for x in ['bateria', 'cargador', 'starter kit']): cat = "Baterías y Cargadores"
-    elif any(x in texto for x in ['mecha', 'disco', 'punta', 'accesorio', 'hoja']): cat = "Accesorios"
+# --- INTERFAZ ---
+st.title("🪄 Procesador Mágico Multihoja")
+st.markdown("Extrae, limpia y unifica listas de proveedores automáticamente para obtener un catálogo perfecto.")
 
-    # 2. Agrupar Alimentación
-    alim = ""
-    if any(x in texto for x in ['inalambric', 'bateria', '18v', '36v', 'li-ion']): alim = "Inalámbrica"
-    elif any(x in texto for x in ['electric', '220v']): alim = "Eléctrica"
-    
-    return f"{cat} {alim}".strip()
-
-# --- INICIALIZAR MEMORIA ---
-if 'datos_acumulados' not in st.session_state:
-    st.session_state.datos_acumulados = pd.DataFrame()
-
-st.title("⚙️ Procesador y Limpiador de Listas de Precios")
-
-# --- CONFIGURACIÓN ---
-st.sidebar.header("1. Configuración de Salida")
-marca_destino = st.sidebar.selectbox("Marca del catálogo:", ["Einhell", "KWB", "Fijaciones", "Penosil", "Otra"])
+marca_destino = st.selectbox("¿A qué marca pertenece este catálogo?", ["Einhell", "KWB", "Fijaciones", "Penosil", "Otra"])
 archivo_salida = f"{marca_destino}_Limpia.xlsx" if marca_destino != "Otra" else "Productos_Limpia.xlsx"
 
-if st.sidebar.button("🗑️ Vaciar Datos", use_container_width=True):
-    st.session_state.datos_acumulados = pd.DataFrame()
-    st.rerun()
-
-# --- CARGA DE ARCHIVO ---
-st.subheader("2. Cargar Excel del Proveedor")
-uploaded_file = st.file_uploader("Sube el archivo original", type=['xlsx', 'xls', 'csv'])
+uploaded_file = st.file_uploader("📂 Sube el Excel original del proveedor (ej. Lista EINHELL Y KWB...)", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
     es_csv = uploaded_file.name.endswith('.csv')
@@ -77,138 +54,98 @@ if uploaded_file:
 
     st.markdown("---")
     
-    # ==========================================
-    # MODO 1: AUTOMÁTICO
-    # ==========================================
-    st.subheader("🚀 Modo Automático")
-    if st.button(f"⚡ Procesar TODO el archivo automáticamente", type="primary", use_container_width=True):
-        with st.spinner("Procesando..."):
+    if st.button(f"⚡ Procesar TODO el Excel Automáticamente", type="primary", use_container_width=True):
+        with st.spinner("Escaneando hojas, extrayendo herramientas y limpiando precios..."):
+            datos_finales = []
             hojas_procesadas = 0
             
             for sheet in sheet_names:
+                # 1. Encontrar la fila de encabezados
                 df_temp = pd.read_csv(xls, nrows=15, header=None) if es_csv else pd.read_excel(xls, sheet_name=sheet, nrows=15, header=None)
-                
-                # Buscar dónde están los títulos (ignorar tildes)
                 fila_header = -1
                 for idx, row in df_temp.iterrows():
                     row_str = normalizar_texto(" ".join([str(x) for x in row.values]))
-                    if "codigo" in row_str or "precio" in row_str:
+                    if "codigo" in row_str or "precio" in row_str or "articulo" in row_str:
                         fila_header = idx
                         break
                 
-                if fila_header == -1: continue # Salta hojas vacías (como Lanzamientos)
+                if fila_header == -1: continue # Salta portadas o hojas vacías
                 
+                # 2. Leer la hoja limpia
                 df_raw = pd.read_csv(xls, skiprows=fila_header) if es_csv else pd.read_excel(xls, sheet_name=sheet, skiprows=fila_header)
-                
                 df_limpio = pd.DataFrame()
-                columnas_app = ['Codigo', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Herramienta', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
                 
-                # Mapeo inteligente sin importar tildes o mayúsculas
-                for col_esp in columnas_app:
-                    col_encontrada = None
-                    c_esp_norm = normalizar_texto(col_esp)
-                    
-                    for c_orig in df_raw.columns:
-                        c_orig_norm = normalizar_texto(c_orig)
-                        # Reglas específicas de coincidencia
-                        if c_esp_norm == 'precio_lista' and 'precio' in c_orig_norm:
-                            col_encontrada = c_orig; break
-                        elif c_esp_norm == 'descripcion' and 'descrip' in c_orig_norm:
-                            col_encontrada = c_orig; break
-                        elif c_esp_norm in c_orig_norm:
-                            col_encontrada = c_orig; break
-                            
-                    df_limpio[col_esp] = df_raw[col_encontrada] if col_encontrada else None
+                # 3. Búsqueda inteligente de columnas
+                cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
+                
+                # Codigo
+                col_cod = next((c for n, c in cols_raw_norm.items() if 'codigo' in n or 'articulo' in n), None)
+                df_limpio['Codigo'] = df_raw[col_cod] if col_cod else None
+                
+                # Modelo
+                col_mod = next((c for n, c in cols_raw_norm.items() if 'modelo' in n or 'nombre' in n), None)
+                df_limpio['Modelo'] = df_raw[col_mod] if col_mod else None
+                
+                # Descripción
+                col_desc = next((c for n, c in cols_raw_norm.items() if 'descrip' in n), None)
+                df_limpio['Descripcion'] = df_raw[col_desc] if col_desc else None
+                
+                # Precio
+                col_precio = next((c for n, c in cols_raw_norm.items() if 'precio' in n and 'sugerido' not in n), None)
+                df_limpio['Precio_Lista'] = df_raw[col_precio] if col_precio else 0.0
+                
+                # IVA
+                col_iva = next((c for n, c in cols_raw_norm.items() if 'iva' in n), None)
+                df_limpio['IVA'] = df_raw[col_iva] if col_iva else 0.21
 
-                # Enriquecimiento y Limpieza
-                df_limpio['Marca'] = marca_destino
+                # 4. Magia de Limpieza
                 df_limpio['Hoja_Origen'] = sheet
+                df_limpio['Marca'] = marca_destino
                 
-                if 'Descripcion' in df_limpio.columns:
-                    df_limpio['Herramienta'] = df_limpio.apply(deducir_herramienta, axis=1)
+                # Extraer Herramienta como en la versión vieja
+                df_limpio['Herramienta'] = df_limpio['Descripcion'].apply(extraer_herramienta)
                 
-                if 'Precio_Lista' in df_limpio.columns: df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
-                if 'IVA' in df_limpio.columns: df_limpio['IVA'] = df_limpio['IVA'].apply(limpiar_iva)
-                if 'Codigo' in df_limpio.columns: df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                # Formatear números
+                df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
+                df_limpio['IVA'] = df_limpio['IVA'].apply(limpiar_iva)
                 
-                # Descartar filas que no tengan código ni descripción
-                df_limpio = df_limpio.dropna(subset=['Codigo', 'Descripcion'], how='all')
+                # Limpiar Códigos (quitar .0)
+                df_limpio = df_limpio.dropna(subset=['Codigo'], how='all')
+                df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                 
-                if not df_limpio.empty:
-                    st.session_state.datos_acumulados = pd.concat([st.session_state.datos_acumulados, df_limpio], ignore_index=True)
-                    hojas_procesadas += 1
-                
-            st.success(f"✅ ¡Proceso Terminado! Se combinaron {hojas_procesadas} hojas con éxito.")
+                datos_finales.append(df_limpio)
+                hojas_procesadas += 1
 
-    # ==========================================
-    # MODO 2: MANUAL
-    # ==========================================
-    with st.expander("🛠️ Modo Manual (Ver y mapear columna por columna)"):
-        col_hoja, col_fila = st.columns(2)
-        hoja_seleccionada = col_hoja.selectbox("Selecciona hoja:", sheet_names)
-        fila_titulos = col_fila.number_input("Fila Títulos (Donde dice 'Código'):", min_value=0, max_value=20, value=2)
+            # 5. Unificar todo
+            if datos_finales:
+                df_final = pd.concat(datos_finales, ignore_index=True)
+                
+                # ORDENAR COLUMNAS EXACTAMENTE COMO EN 'Einhell_Limpia.xlsx'
+                columnas_ordenadas = ['Codigo', 'Herramienta', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen', 'Marca']
+                # Si falta alguna columna, la agregamos vacía, y filtramos
+                for col in columnas_ordenadas:
+                    if col not in df_final.columns:
+                        df_final[col] = None
+                df_final = df_final[columnas_ordenadas]
 
-        df_raw = pd.read_csv(xls, skiprows=fila_titulos) if es_csv else pd.read_excel(xls, sheet_name=hoja_seleccionada, skiprows=fila_titulos)
-        
-        st.markdown("**Vista previa de la hoja (Usa esto para saber qué elegir abajo):**")
-        st.dataframe(df_raw.head(3), use_container_width=True)
-        
-        columnas_app = ['Codigo', 'Modelo', 'Descripcion', 'Precio_Lista', 'IVA', 'Herramienta', 'Color', 'Embalaje', 'CantidadPorCaja', 'UnidadPrecio']
-        opciones_columnas = ["--- No usar ---"] + list(df_raw.columns)
-        mapeo = {}
-        
-        cols = st.columns(3)
-        for i, col_esperada in enumerate(columnas_app):
-            with cols[i % 3]:
-                index_default = 0
-                for j, c_orig in enumerate(opciones_columnas):
-                    c_orig_norm = normalizar_texto(c_orig)
-                    c_esp_norm = normalizar_texto(col_esperada)
-                    if c_esp_norm in c_orig_norm or (c_esp_norm == 'precio_lista' and 'precio' in c_orig_norm) or (c_esp_norm == 'descripcion' and 'descrip' in c_orig_norm):
-                        index_default = j
-                        break
-                mapeo[col_esperada] = st.selectbox(f"'{col_esperada}':", options=opciones_columnas, index=index_default, key=col_esperada+"_manual")
-
-        if st.button("➕ Limpiar y Añadir esta hoja"):
-            df_limpio = pd.DataFrame()
-            for col_esperada, col_origen in mapeo.items():
-                df_limpio[col_esperada] = df_raw[col_origen] if col_origen != "--- No usar ---" else None 
-                    
-            df_limpio['Marca'] = marca_destino
-            df_limpio['Hoja_Origen'] = hoja_seleccionada
-            
-            if 'Descripcion' in df_limpio.columns:
-                df_limpio['Herramienta'] = df_limpio.apply(deducir_herramienta, axis=1)
-            
-            if 'Precio_Lista' in df_limpio.columns: df_limpio['Precio_Lista'] = df_limpio['Precio_Lista'].apply(limpiar_precio)
-            if 'IVA' in df_limpio.columns: df_limpio['IVA'] = df_limpio['IVA'].apply(limpiar_iva)
-            if 'Codigo' in df_limpio.columns: df_limpio['Codigo'] = df_limpio['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-            
-            df_limpio = df_limpio.dropna(subset=['Codigo', 'Descripcion'], how='all')
-            if not df_limpio.empty:
-                st.session_state.datos_acumulados = pd.concat([st.session_state.datos_acumulados, df_limpio], ignore_index=True)
-                st.success(f"✅ Hoja añadida manualmente ({len(df_limpio)} productos).")
+                st.success(f"✅ ¡Magia Terminada! Se combinaron {hojas_procesadas} hojas y se extrajeron las herramientas.")
+                
+                st.subheader("📦 Resultado Final (Idéntico a la versión anterior)")
+                st.dataframe(df_final.head(15), use_container_width=True)
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_final.to_excel(writer, index=False, sheet_name='Productos')
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.download_button(
+                        label=f"⬇️ Descargar {archivo_salida}",
+                        data=output.getvalue(),
+                        file_name=archivo_salida,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
             else:
-                st.error("⚠️ La hoja resultó vacía. Revisa el mapeo de Código y Descripción.")
-
-# ==========================================
-# DESCARGA FINAL
-# ==========================================
-if not st.session_state.datos_acumulados.empty:
-    st.markdown("---")
-    st.subheader("📦 Catálogo Final Acumulado (Listo para app.py)")
-    st.dataframe(st.session_state.datos_acumulados.head(10), use_container_width=True)
-    st.info(f"Total de productos unificados: **{len(st.session_state.datos_acumulados)}**")
-    
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        st.session_state.datos_acumulados.to_excel(writer, index=False, sheet_name='Productos')
-    
-    st.download_button(
-        label=f"⬇️ Descargar Archivo Final ({archivo_salida})",
-        data=output.getvalue(),
-        file_name=archivo_salida,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=True
-    )
+                st.error("No se encontraron datos procesables en el archivo.")
