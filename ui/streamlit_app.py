@@ -75,7 +75,7 @@ if uploaded_file:
     xls = uploaded_file if es_csv else pd.ExcelFile(uploaded_file)
     sheet_names = ["Hoja CSV"] if es_csv else xls.sheet_names
 
-    # Filtrar hojas que ya fueron procesadas
+    # Filtrar hojas procesadas
     hojas_disponibles = [hoja for hoja in sheet_names if hoja not in st.session_state.hojas_procesadas]
 
     st.markdown("---")
@@ -173,8 +173,8 @@ if not st.session_state.datos_acumulados.empty:
     # 1. Eliminar Códigos Fantasma (Subtítulos o basura): El código NO debe contener letras
     df_final = df_final[~df_final['Codigo'].astype(str).str.contains(r'[a-zA-Z]', na=False)]
     
-    # 2. Normalizar Marcas (Para que los filtros de app.py funcionen perfecto)
-    df_final['Marca'] = df_final['Marca'].astype(str).str.upper().strip()
+    # 2. Normalizar Marcas (CORREGIDO PARA EVITAR EL ERROR DE PANDAS)
+    df_final['Marca'] = df_final['Marca'].astype(str).str.upper().str.strip()
     df_final['Marca'] = df_final['Marca'].replace({'EINHELL': 'Einhell', 'KWB': 'KWB'})
     
     # 3. Rellenar Vacíos Cruzados (Para que el buscador de app.py nunca falle)
